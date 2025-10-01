@@ -98,6 +98,63 @@ def _(mo):
             value=1.2193,
             label="CTA - Contribution Tarifaire d'Acheminement"
         ),
+        # Tarifs TURPE variable par cadran (c€/kWh)
+        "HPH_CU": mo.ui.number(
+            start=0,
+            stop=50,
+            step=0.01,
+            value=1.54,
+            label="HPH CU - Heures Pleines Hiver (c€/kWh)"
+        ),
+        "HCH_CU": mo.ui.number(
+            start=0,
+            stop=50,
+            step=0.01,
+            value=1.07,
+            label="HCH CU - Heures Creuses Hiver (c€/kWh)"
+        ),
+        "HPE_CU": mo.ui.number(
+            start=0,
+            stop=50,
+            step=0.01,
+            value=1.05,
+            label="HPE CU - Heures Pleines Été (c€/kWh)"
+        ),
+        "HCE_CU": mo.ui.number(
+            start=0,
+            stop=50,
+            step=0.01,
+            value=0.82,
+            label="HCE CU - Heures Creuses Été (c€/kWh)"
+        ),
+        "HPH_LU": mo.ui.number(
+            start=0,
+            stop=50,
+            step=0.01,
+            value=0.75,
+            label="HPH LU - Heures Pleines Hiver (c€/kWh)"
+        ),
+        "HCH_LU": mo.ui.number(
+            start=0,
+            stop=50,
+            step=0.01,
+            value=0.52,
+            label="HCH LU - Heures Creuses Hiver (c€/kWh)"
+        ),
+        "HPE_LU": mo.ui.number(
+            start=0,
+            stop=50,
+            step=0.01,
+            value=0.51,
+            label="HPE LU - Heures Pleines Été (c€/kWh)"
+        ),
+        "HCE_LU": mo.ui.number(
+            start=0,
+            stop=50,
+            step=0.01,
+            value=0.40,
+            label="HCE LU - Heures Creuses Été (c€/kWh)"
+        ),
     })
     params_turpe
     return (params_turpe,)
@@ -125,7 +182,7 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(mo):
-    mo.md("## ⏰ Plages horaires tarifaires")
+    mo.md("""## ⏰ Plages horaires tarifaires""")
     return
 
 
@@ -221,7 +278,7 @@ def _(enrichir_dataframe, file_upload, io, mo, pl, plage_hc_input):
                     - Pas de temps : {pas_exemple} {warning_pas}
 
                     **Consommation par cadran tarifaire :**
-{cadrans_str}
+    {cadrans_str}
 
                     {warning}
                     """)
@@ -280,8 +337,7 @@ def _(pl):
             .sum()
             .item()
         )
-
-    return calculer_duree_depassement, expr_depassement
+    return (calculer_duree_depassement,)
 
 
 @app.cell
@@ -403,7 +459,35 @@ def _(datetime, pl, time):
             expr_cadran(plage_hc).alias('cadran')
         ])
 
-    return enrichir_dataframe, expr_cadran, expr_horaire, expr_saison, expr_volume, parser_plages_horaires
+    def calculer_turpe_variable(df: pl.DataFrame, params: dict, option: str) -> float:
+        """
+        Calcule le coût TURPE variable total pour une option tarifaire.
+
+        Args:
+            df: DataFrame enrichi avec colonnes 'cadran' et 'volume'
+            params: Dictionnaire des paramètres TURPE
+            option: 'CU' ou 'LU'
+
+        Returns:
+            Coût TURPE variable total annuel (€)
+        """
+        # Agréger les volumes par cadran
+        volumes_cadrans = df.group_by('cadran').agg([
+            pl.col('volume').sum().alias('volume_total')
+        ])
+
+        cout_total = 0.0
+        for row in volumes_cadrans.iter_rows(named=True):
+            cadran = row['cadran']
+            volume = row['volume_total']
+            # Tarif en c€/kWh, on convertit en €/kWh
+            tarif_key = f"{cadran}_{option}"
+            tarif = params.get(tarif_key, 0) / 100.0  # c€ → €
+            cout_total += volume * tarif
+
+        return cout_total
+
+    return calculer_turpe_variable, enrichir_dataframe
 
 
 @app.cell(hide_code=True)
@@ -422,6 +506,7 @@ def _(params_turpe):
 @app.cell(hide_code=True)
 def _(
     calculer_duree_depassement,
+    calculer_turpe_variable,
     cdc,
     fixe_CU,
     fixe_LU,
@@ -436,21 +521,28 @@ def _(
         P_min, P_max = plage_puissance.value
         Ps = list(range(P_min, P_max + 1))
 
+        # Calcul du TURPE variable (identique pour toutes les puissances)
+        params = params_turpe.value
+        cout_variable_cu = calculer_turpe_variable(cdc, params, 'CU')
+        cout_variable_lu = calculer_turpe_variable(cdc, params, 'LU')
+
         # Calcul pour chaque puissance
         resultats = []
         for P in Ps:
             cout_fixe_cu = fixe_CU(P)
             cout_fixe_lu = fixe_LU(P)
             duree_depassement_h = calculer_duree_depassement(cdc, P)
-            cout_depassement = duree_depassement_h * params_turpe.value["CMDPS"]
+            cout_depassement = duree_depassement_h * params["CMDPS"]
 
             resultats.append({
                 'PS': P,
                 'CU fixe': cout_fixe_cu,
                 'LU fixe': cout_fixe_lu,
+                'CU variable': cout_variable_cu,
+                'LU variable': cout_variable_lu,
                 'Dépassement': cout_depassement,
-                'Total CU': cout_fixe_cu + cout_depassement,
-                'Total LU': cout_fixe_lu + cout_depassement
+                'Total CU': cout_fixe_cu + cout_variable_cu + cout_depassement,
+                'Total LU': cout_fixe_lu + cout_variable_lu + cout_depassement
             })
 
         Simulation = pl.DataFrame(resultats)
