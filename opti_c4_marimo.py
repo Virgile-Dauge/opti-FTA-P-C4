@@ -9,9 +9,9 @@ def _():
     import marimo as mo
     import polars as pl
     from pathlib import Path
-    from datetime import datetime
+    from datetime import datetime, time
     import io
-    return io, mo, pl
+    return datetime, io, mo, pl, time
 
 
 @app.cell(hide_code=True)
@@ -124,7 +124,25 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(file_upload, io, mo, pl):
+def _(mo):
+    mo.md("## ⏰ Plages horaires tarifaires")
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    plage_hc_input = mo.ui.text(
+        value="02h00-07h00",
+        label="Plages horaires Heures Creuses (HC)",
+        placeholder="Ex: 02h00-07h00 ou 02h00-07h00;22h00-06h00",
+        full_width=True
+    )
+    plage_hc_input
+    return (plage_hc_input,)
+
+
+@app.cell(hide_code=True)
+def _(enrichir_dataframe, file_upload, io, mo, pl, plage_hc_input):
     # Traitement du fichier CSV uploadé
     if file_upload.value is None:
         cdc = None
@@ -173,6 +191,9 @@ def _(file_upload, io, mo, pl):
                     cdc = None
                     msg_data = mo.md("❌ Aucune donnée de Puissance Active (PA) trouvée")
                 else:
+                    # Enrichir avec volume, saison, horaire, cadran
+                    cdc = enrichir_dataframe(cdc, plage_hc_input.value)
+
                     duree_jours = (cdc['Horodate'].max() - cdc['Horodate'].min()).days
                     warning = f"⚠️ Seulement {duree_jours} jours de données (recommandé : 365 jours)" if duree_jours < 365 else ""
 
@@ -181,6 +202,16 @@ def _(file_upload, io, mo, pl):
                     pas_uniques = cdc['Pas'].n_unique()
                     warning_pas = f"\n⚠️ Attention : {pas_uniques} pas de temps différents détectés" if pas_uniques > 1 else ""
 
+                    # Statistiques par cadran
+                    stats_cadrans = cdc.group_by('cadran').agg([
+                        pl.col('volume').sum().alias('volume_total')
+                    ]).sort('cadran')
+
+                    cadrans_str = "\n".join([
+                        f"     - {row['cadran']} : {row['volume_total']:.0f} kWh"
+                        for row in stats_cadrans.iter_rows(named=True)
+                    ])
+
                     msg_data = mo.md(f"""
                     ✅ **Données chargées avec succès**
 
@@ -188,6 +219,9 @@ def _(file_upload, io, mo, pl):
                     - Période : {cdc['Horodate'].min()} → {cdc['Horodate'].max()}
                     - Puissance max : {cdc['Valeur'].max():.2f} kW
                     - Pas de temps : {pas_exemple} {warning_pas}
+
+                    **Consommation par cadran tarifaire :**
+{cadrans_str}
 
                     {warning}
                     """)
@@ -246,7 +280,130 @@ def _(pl):
             .sum()
             .item()
         )
-    return (calculer_duree_depassement,)
+
+    return calculer_duree_depassement, expr_depassement
+
+
+@app.cell
+def _(datetime, pl, time):
+    def expr_volume() -> pl.Expr:
+        """
+        Expression Polars pour calculer le volume en kWh.
+
+        volume = Valeur (kW) × pas_heures (h)
+
+        Returns:
+            Expression Polars du volume en kWh
+        """
+        return pl.col('Valeur') * pl.col('pas_heures')
+
+    def expr_saison() -> pl.Expr:
+        """
+        Expression Polars pour déterminer la saison tarifaire.
+
+        - H (Hiver) : novembre à mars (mois < 4 ou > 10)
+        - B (Été/Basse) : avril à octobre (mois 4-10)
+
+        Returns:
+            Expression Polars retournant 'H' ou 'B'
+        """
+        return pl.when(
+            (pl.col('Horodate').dt.month() < 4) | (pl.col('Horodate').dt.month() > 10)
+        ).then(pl.lit('H')).otherwise(pl.lit('B'))
+
+    def parser_plages_horaires(plage_str: str) -> list[tuple[time, time]]:
+        """
+        Parse une chaîne de plages horaires format Enedis.
+
+        Format : "08h00-12h00;14h00-18h00"
+
+        Returns:
+            Liste de tuples (heure_debut, heure_fin)
+        """
+        if not plage_str or plage_str.strip() == '':
+            return []
+
+        plage_str = plage_str.replace(' ', '').replace('(', '').replace(')', '')
+        plages = []
+
+        for slot in plage_str.split(';'):
+            if '-' not in slot:
+                continue
+            start_str, end_str = slot.split('-')
+            start_time = datetime.strptime(start_str, '%Hh%M').time()
+            end_time = datetime.strptime(end_str, '%Hh%M').time()
+            plages.append((start_time, end_time))
+
+        return plages
+
+    def expr_horaire(plage_str: str) -> pl.Expr:
+        """
+        Expression Polars pour déterminer si en Heures Creuses (HC) ou Heures Pleines (HP).
+
+        Args:
+            plage_str: Plages horaires HC format "08h00-12h00;14h00-18h00"
+
+        Returns:
+            Expression Polars retournant 'HC' ou 'HP'
+        """
+        plages = parser_plages_horaires(plage_str)
+
+        if not plages:
+            # Pas de plages HC définies = tout en HP
+            return pl.lit('HP')
+
+        # Construire la condition : True si dans une des plages HC
+        condition = pl.lit(False)
+
+        for start_time, end_time in plages:
+            heure_courante = pl.col('Horodate').dt.time()
+
+            if start_time < end_time:
+                # Plage normale (ex: 02h00-07h00)
+                condition = condition | (
+                    (heure_courante >= start_time) & (heure_courante <= end_time)
+                )
+            else:
+                # Plage à cheval sur minuit (ex: 22h00-06h00)
+                condition = condition | (
+                    (heure_courante >= start_time) | (heure_courante <= end_time)
+                )
+
+        return pl.when(condition).then(pl.lit('HC')).otherwise(pl.lit('HP'))
+
+    def expr_cadran(plage_str: str) -> pl.Expr:
+        """
+        Expression Polars pour déterminer le cadran tarifaire complet.
+
+        Cadrans possibles : HPH, HCH, HPB, HCB
+
+        Args:
+            plage_str: Plages horaires HC format "08h00-12h00;14h00-18h00"
+
+        Returns:
+            Expression Polars retournant le cadran (ex: 'HPH', 'HCB')
+        """
+        return expr_horaire(plage_str) + expr_saison()
+
+    def enrichir_dataframe(df: pl.DataFrame, plage_hc: str) -> pl.DataFrame:
+        """
+        Enrichit le DataFrame avec les colonnes volume, saison, horaire et cadran.
+
+        Args:
+            df: DataFrame avec colonnes 'Horodate', 'Valeur', 'pas_heures'
+            plage_hc: Plages horaires Heures Creuses (ex: "02h00-07h00;22h00-06h00")
+
+        Returns:
+            DataFrame enrichi avec colonnes supplémentaires
+        """
+        return df.with_columns([
+            expr_volume().alias('volume'),
+            expr_saison().alias('saison'),
+            expr_horaire(plage_hc).alias('horaire'),
+            expr_cadran(plage_hc).alias('cadran')
+        ])
+
+    return enrichir_dataframe, expr_cadran, expr_horaire, expr_saison, expr_volume, parser_plages_horaires
 
 
 @app.cell(hide_code=True)
