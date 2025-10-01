@@ -1,0 +1,22 @@
+[project]
+name = "opti-c4"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "virgile",email = "virgile.dauge@pm.me"}
+]
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "polars (>=1.33.1,<2.0.0)",
+    "marimo (>=0.16.3,<0.17.0)",
+    "altair (>=5.5.0,<6.0.0)",
+    "xlsxwriter (>=3.2.9,<4.0.0)",
+    "pyarrow (>=21.0.0,<22.0.0)",
+    "pandas (>=2.3.3,<3.0.0)"
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
