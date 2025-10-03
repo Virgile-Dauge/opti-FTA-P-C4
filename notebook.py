@@ -3,19 +3,26 @@ import marimo
 __generated_with = "0.16.3"
 app = marimo.App(width="medium")
 
+async with app.setup:
+    # Initialization code that runs before all other cells
 
-@app.cell(hide_code=True)
-def _():
+    # Installation des dépendances pour WASM (Pyodide)
+    import sys
+    if "pyodide" in sys.modules:
+        import micropip
+        await micropip.install("pyarrow")
+        await micropip.install("xlsxwriter")
+
+    # Imports standards
     import marimo as mo
     import polars as pl
     from pathlib import Path
     from datetime import datetime, time
     import io
-    return datetime, io, mo, pl, time
 
 
 @app.cell(hide_code=True)
-def _(mo):
+def _():
     mo.md(
         r"""
     # 🔌 Optimisation TURPE - Calcul de Puissance Souscrite Optimale
@@ -31,13 +38,13 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(mo):
+def _():
     mo.md("""## 📂 Upload de la courbe de charge""")
     return
 
 
 @app.cell(hide_code=True)
-def _(mo):
+def _():
     file_upload = mo.ui.file(
         filetypes=[".csv"],
         kind="area",
@@ -48,13 +55,13 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(mo):
+def _():
     mo.md("""## ⚙️ Paramètres TURPE""")
     return
 
 
 @app.cell(hide_code=True)
-def _(mo):
+def _():
     params_turpe = mo.ui.dictionary({
         "CG": mo.ui.number(
             start=0,
@@ -161,13 +168,13 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(mo):
+def _():
     mo.md("""## 📊 Plage de puissances à tester""")
     return
 
 
 @app.cell(hide_code=True)
-def _(mo):
+def _():
     plage_puissance = mo.ui.range_slider(
         start=10,
         stop=100,
@@ -181,13 +188,13 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(mo):
+def _():
     mo.md("""## ⏰ Plages horaires tarifaires""")
     return
 
 
 @app.cell(hide_code=True)
-def _(mo):
+def _():
     plage_hc_input = mo.ui.text(
         value="02h00-07h00",
         label="Plages horaires Heures Creuses (HC)",
@@ -199,7 +206,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(datetime, plage_hc_input, time):
+def _(plage_hc_input):
     # Parser les plages horaires une seule fois
     def parser_plages_horaires(plage_str: str) -> list[tuple[time, time]]:
         """
@@ -237,13 +244,13 @@ def _(plages_hc):
 
 
 @app.cell
-def _(mo):
+def _():
     mo.md(r"""## Traitement de la courbe de charge""")
     return
 
 
 @app.cell(hide_code=True)
-def _(file_upload, io, mo, pl):
+def _(file_upload):
     # Chargement des données brutes
     mo.stop(not file_upload.value, mo.md("⚠️ Veuillez uploader un fichier CSV pour commencer l'analyse"))
 
@@ -280,7 +287,7 @@ def _(file_upload, io, mo, pl):
 
 
 @app.cell(hide_code=True)
-def _(cdc_brut, enrichir_dataframe, mo, pl, plages_hc):
+def _(cdc_brut, enrichir_dataframe, plages_hc):
     # Enrichissement des données avec cadrans tarifaires
     cdc = enrichir_dataframe(cdc_brut, plages_hc)
 
@@ -321,7 +328,7 @@ def _(cdc):
 
 
 @app.cell(hide_code=True)
-def fonctions_enrichissement(pl, time):
+def fonctions_enrichissement():
     def expr_depassement(P: float) -> pl.Expr:
         """
         Expression Polars qui identifie les dépassements de puissance.
@@ -334,7 +341,7 @@ def fonctions_enrichissement(pl, time):
         """
         return pl.col('Valeur') > P
 
-    
+
     def expr_pas_heures() -> pl.Expr:
         """
         Expression Polars pour calculer le pas en heures à partir de la colonne 'Pas'.
@@ -449,7 +456,7 @@ def fonctions_enrichissement(pl, time):
 
 
 @app.cell(hide_code=True)
-def _(expr_depassement, params_turpe, pl):
+def _(expr_depassement, params_turpe):
     # Fonctions de calcul
     def fixe_CU(P):
         """Calcule le coût fixe annuel en option Courte Utilisation (CU)."""
@@ -531,7 +538,7 @@ def _(expr_depassement, params_turpe, pl):
 
 
 @app.cell
-def _(mo):
+def _():
     mo.md(r"""## Simulation en fonction de la puissance""")
     return
 
@@ -543,9 +550,7 @@ def simulation(
     cdc,
     fixe_CU,
     fixe_LU,
-    mo,
     params_turpe,
-    pl,
     plage_puissance,
 ):
     # Simulation TURPE
@@ -591,15 +596,14 @@ def simulation(
     cout_opt_LU = Simulation['Total LU'][idx_opt_LU]
 
     mo.md("✅ Simulation terminée")
-
     return P_opt_CU, P_opt_LU, Simulation, cout_opt_CU, cout_opt_LU
 
 
 @app.cell(hide_code=True)
-def _(P_opt_CU, P_opt_LU, Simulation, cout_opt_CU, cout_opt_LU, mo):
+def _(P_opt_CU, P_opt_LU, Simulation, cout_opt_CU, cout_opt_LU):
     # Affichage des résultats
     mo.stop(Simulation is None, output=mo.md("⏸️ En attente de la simulation"))
-    
+
     economie = abs(cout_opt_CU - cout_opt_LU)
     recommandation = "CU" if cout_opt_CU < cout_opt_LU else "LU"
     P_recommande = P_opt_CU if cout_opt_CU < cout_opt_LU else P_opt_LU
@@ -618,12 +622,11 @@ def _(P_opt_CU, P_opt_LU, Simulation, cout_opt_CU, cout_opt_LU, mo):
 
     ---
     """)
-
     return P_recommande, cout_recommande, economie, recommandation
 
 
 @app.cell(hide_code=True)
-def _(P_recommande, cout_recommande, economie, mo, recommandation):
+def _(P_recommande, cout_recommande, economie, recommandation):
     mo.md(
         f"""
     ## 🎯 Résultats de l'optimisation
@@ -639,7 +642,7 @@ def _(P_recommande, cout_recommande, economie, mo, recommandation):
 
 
 @app.cell(hide_code=True)
-def _(Simulation, mo):
+def _(Simulation):
     # Graphique interactif
     if Simulation is not None:
         import altair as alt
@@ -676,7 +679,7 @@ def _(Simulation, mo):
 
 
 @app.cell(hide_code=True)
-def _(Simulation, io, mo):
+def _(Simulation):
     # Export Excel
     if Simulation is not None:
         # Créer le fichier Excel en mémoire
