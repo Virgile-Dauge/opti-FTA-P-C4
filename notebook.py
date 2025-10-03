@@ -683,7 +683,7 @@ def _(Simulation):
         # Créer le graphique
         chart = alt.Chart(df_melted.to_pandas()).mark_line(point=True).encode(
             x=alt.X('PS:Q', title='Puissance souscrite (kW)'),
-            y=alt.Y('Coût:Q', title='Coût annuel (€/an)', scale=alt.Scale(zero=False)),
+            y=alt.Y('Coût:Q', title='Coût annuel projeté (€/an)', scale=alt.Scale(zero=False)),
             color=alt.Color('Option:N', title='Option tarifaire'),
             tooltip=['PS', 'Option', alt.Tooltip('Coût:Q', format='.2f')]
         ).properties(
