@@ -169,26 +169,6 @@ def _():
 
 @app.cell(hide_code=True)
 def _():
-    mo.md("""## 📊 Plage de puissances à tester""")
-    return
-
-
-@app.cell(hide_code=True)
-def _():
-    plage_puissance = mo.ui.range_slider(
-        start=10,
-        stop=100,
-        step=1,
-        value=[36, 66],
-        label="Puissances à simuler (kW)",
-        show_value=True
-    )
-    plage_puissance
-    return (plage_puissance,)
-
-
-@app.cell(hide_code=True)
-def _():
     mo.md("""## ⏰ Plages horaires tarifaires""")
     return
 
@@ -661,6 +641,26 @@ def _(P_recommande, cout_recommande, economie, recommandation):
     """
     )
     return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md("""## 📊 Plage de puissances à tester""")
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    plage_puissance = mo.ui.range_slider(
+        start=10,
+        stop=100,
+        step=1,
+        value=[36, 66],
+        label="Puissances à simuler (kW)",
+        show_value=True
+    )
+    plage_puissance
+    return (plage_puissance,)
 
 
 @app.cell(hide_code=True)
