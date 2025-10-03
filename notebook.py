@@ -683,13 +683,13 @@ def _(Simulation):
         # Créer le graphique
         chart = alt.Chart(df_melted.to_pandas()).mark_line(point=True).encode(
             x=alt.X('PS:Q', title='Puissance souscrite (kW)'),
-            y=alt.Y('Coût:Q', title='Coût annuel (€/an)'),
+            y=alt.Y('Coût:Q', title='Coût annuel (€/an)', scale=alt.Scale(zero=False)),
             color=alt.Color('Option:N', title='Option tarifaire'),
             tooltip=['PS', 'Option', alt.Tooltip('Coût:Q', format='.2f')]
         ).properties(
             width=700,
             height=400,
-            title="Coût d'acheminement fixe annuel en fonction de la puissance souscrite"
+            title="Coût d'acheminement et CTA annuel projeté en fonction de la puissance souscrite"
         ).interactive()
 
         _graphique = mo.ui.altair_chart(chart)
