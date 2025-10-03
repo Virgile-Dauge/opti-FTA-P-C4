@@ -598,30 +598,27 @@ def simulation(
 @app.cell(hide_code=True)
 def _(P_opt_CU, P_opt_LU, Simulation, cout_opt_CU, cout_opt_LU, mo):
     # Affichage des résultats
-    if Simulation is not None:
-        economie = abs(cout_opt_CU - cout_opt_LU)
-        recommandation = "CU" if cout_opt_CU < cout_opt_LU else "LU"
-        P_recommande = P_opt_CU if cout_opt_CU < cout_opt_LU else P_opt_LU
-        cout_recommande = min(cout_opt_CU, cout_opt_LU)
+    mo.stop(Simulation is None, output=mo.md("⏸️ En attente de la simulation"))
+    
+    economie = abs(cout_opt_CU - cout_opt_LU)
+    recommandation = "CU" if cout_opt_CU < cout_opt_LU else "LU"
+    P_recommande = P_opt_CU if cout_opt_CU < cout_opt_LU else P_opt_LU
+    cout_recommande = min(cout_opt_CU, cout_opt_LU)
 
-        resultats_md = mo.md(f"""
-        ## 🎯 Résultats de l'optimisation
+    mo.md(f"""
+    ## 🎯 Résultats de l'optimisation
 
-        ### 📌 Option COURTE UTILISATION (CU)
-        - **Puissance optimale** : {P_opt_CU} kW
-        - **Coût annuel** : {cout_opt_CU:.2f} €/an
+    ### 📌 Option COURTE UTILISATION (CU)
+    - **Puissance optimale** : {P_opt_CU} kW
+    - **Coût annuel** : {cout_opt_CU:.2f} €/an
 
-        ### 📌 Option LONGUE UTILISATION (LU)
-        - **Puissance optimale** : {P_opt_LU} kW
-        - **Coût annuel** : {cout_opt_LU:.2f} €/an
+    ### 📌 Option LONGUE UTILISATION (LU)
+    - **Puissance optimale** : {P_opt_LU} kW
+    - **Coût annuel** : {cout_opt_LU:.2f} €/an
 
-        ---
-        """)
+    ---
+    """)
 
-    else:
-        resultats_md = mo.md("")
-
-    resultats_md
     return P_recommande, cout_recommande, economie, recommandation
 
 
