@@ -196,7 +196,7 @@ def _():
 @app.cell(hide_code=True)
 def _():
     plage_hc_input = mo.ui.text(
-        value="02h00-07h00",
+        value="22h00-06h00",
         label="Plages horaires Heures Creuses (HC)",
         placeholder="Ex: 02h00-07h00 ou 02h00-07h00;22h00-06h00",
         full_width=True
@@ -271,7 +271,7 @@ def _(file_upload):
             pl.col('Horodate').str.strptime(pl.Datetime, '%Y-%m-%d %H:%M:%S'),
             (pl.col('Valeur') / 1000.0).alias('Valeur'),  # Watts -> kW
         ])
-        .select(['Horodate', 'Valeur', 'Pas'])
+        .select(['Horodate', 'Valeur', 'Pas', 'Identifiant PRM'])
     )
 
     mo.stop(cdc_brut.is_empty(), mo.md("❌ Aucune donnée de Puissance Active (PA) trouvée"))
@@ -284,6 +284,28 @@ def _(file_upload):
     - Puissance max : {cdc_brut['Valeur'].max():.2f} kW
     """)
     return (cdc_brut,)
+
+
+@app.cell(hide_code=True)
+def _(cdc_brut):
+    # Affichage des PRMs
+    _prms = cdc_brut['Identifiant PRM'].unique().sort()
+    _nb_prms = len(_prms)
+
+    if _nb_prms == 1:
+        _msg = mo.md(f"ℹ️ **PRM identifié** : `{_prms[0]}`")
+    else:
+        _prms_list = '\n'.join([f"- `{prm}`" for prm in _prms])
+        _msg = mo.md(f"""
+            ⚠️ **Attention : {_nb_prms} PRMs détectés dans le fichier**
+
+            {_prms_list}
+
+            Les analyses portent sur l'ensemble des données. Si vous souhaitez analyser un seul PRM,
+            merci de filtrer le fichier CSV en amont.
+        """)
+    _msg
+    return
 
 
 @app.cell(hide_code=True)
