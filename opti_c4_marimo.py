@@ -199,6 +199,50 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
+def _(datetime, plage_hc_input, time):
+    # Parser les plages horaires une seule fois
+    def parser_plages_horaires(plage_str: str) -> list[tuple[time, time]]:
+        """
+        Parse une chaîne de plages horaires format Enedis.
+
+        Format : "08h00-12h00;14h00-18h00"
+
+        Returns:
+            Liste de tuples (heure_debut, heure_fin)
+        """
+        if not plage_str or plage_str.strip() == '':
+            return []
+
+        plage_str = plage_str.replace(' ', '').replace('(', '').replace(')', '')
+        plages = []
+
+        for slot in plage_str.split(';'):
+            if '-' not in slot:
+                continue
+            start_str, end_str = slot.split('-')
+            start_time = datetime.strptime(start_str, '%Hh%M').time()
+            end_time = datetime.strptime(end_str, '%Hh%M').time()
+            plages.append((start_time, end_time))
+
+        return plages
+
+    plages_hc = parser_plages_horaires(plage_hc_input.value)
+    return (plages_hc,)
+
+
+@app.cell
+def _(plages_hc):
+    plages_hc
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""## Traitement de la courbe de charge""")
+    return
+
+
+@app.cell(hide_code=True)
 def _(file_upload, io, mo, pl):
     # Chargement des données brutes
     mo.stop(not file_upload.value, mo.md("⚠️ Veuillez uploader un fichier CSV pour commencer l'analyse"))
@@ -236,21 +280,9 @@ def _(file_upload, io, mo, pl):
 
 
 @app.cell(hide_code=True)
-def _(cdc_brut, enrichir_dataframe, mo, pl, plage_hc_input):
+def _(cdc_brut, enrichir_dataframe, mo, pl, plages_hc):
     # Enrichissement des données avec cadrans tarifaires
-    # Calculer le pas en heures
-    _cdc_avec_pas = cdc_brut.with_columns([
-        (
-            pl.col('Pas')
-            .str.strip_prefix('PT')
-            .str.strip_suffix('M')
-            .cast(pl.Int32)
-            / 60.0
-        ).alias('pas_heures')
-    ])
-
-    # Enrichir avec volume, saison, horaire, cadran
-    cdc = enrichir_dataframe(_cdc_avec_pas, plage_hc_input.value)
+    cdc = enrichir_dataframe(cdc_brut, plages_hc)
 
     duree_jours = (cdc['Horodate'].max() - cdc['Horodate'].min()).days
     warning = f"\n⚠️ Seulement {duree_jours} jours de données (recommandé : 365 jours)" if duree_jours < 365 else ""
@@ -261,23 +293,23 @@ def _(cdc_brut, enrichir_dataframe, mo, pl, plage_hc_input):
     warning_pas = f"\n⚠️ Attention : {pas_uniques} pas de temps différents détectés" if pas_uniques > 1 else ""
 
     # Statistiques par cadran
-    stats_cadrans = cdc.group_by('cadran').agg([
+    _stats_cadrans = cdc.group_by('cadran').agg([
         pl.col('volume').sum().alias('volume_total')
     ]).sort('cadran')
 
-    cadrans_str = "\n".join([
+    _cadrans_str = "\n".join([
         f"     - {row['cadran']} : {row['volume_total']:.0f} kWh"
-        for row in stats_cadrans.iter_rows(named=True)
+        for row in _stats_cadrans.iter_rows(named=True)
     ])
 
     mo.md(f"""
-    ✅ **Données enrichies avec succès**
+        ✅ **Données enrichies avec succès**
 
-    - Pas de temps : {pas_exemple}{warning_pas}
+        - Pas de temps : {pas_exemple}{warning_pas}
 
-    **Consommation par cadran tarifaire :**
-{cadrans_str}
-{warning}
+        **Consommation par cadran tarifaire :**
+        {_cadrans_str}
+        {warning}
     """)
     return (cdc,)
 
@@ -288,8 +320,8 @@ def _(cdc):
     return
 
 
-@app.cell
-def _(pl):
+@app.cell(hide_code=True)
+def fonctions_enrichissement(pl, time):
     def expr_depassement(P: float) -> pl.Expr:
         """
         Expression Polars qui identifie les dépassements de puissance.
@@ -301,6 +333,139 @@ def _(pl):
             Expression Polars booléenne : True si dépassement, False sinon
         """
         return pl.col('Valeur') > P
+
+    
+    def expr_pas_heures() -> pl.Expr:
+        """
+        Expression Polars pour calculer le pas en heures à partir de la colonne 'Pas'.
+
+        Convertit 'PT5M' → 5/60 = 0.0833 heures
+
+        Returns:
+            Expression Polars du pas en heures
+        """
+        return (
+            pl.col('Pas')
+            .str.strip_prefix('PT')
+            .str.strip_suffix('M')
+            .cast(pl.Int32)
+            / 60.0
+        )
+
+    def expr_volume() -> pl.Expr:
+        """
+        Expression Polars pour calculer le volume en kWh.
+
+        volume = Valeur (kW) × pas_heures (h)
+
+        Returns:
+            Expression Polars du volume en kWh
+        """
+        return pl.col('Valeur') * pl.col('pas_heures')
+
+    def expr_saison() -> pl.Expr:
+        """
+        Expression Polars pour déterminer la saison tarifaire.
+
+        - H (Hiver) : novembre à mars (mois < 4 ou > 10)
+        - B (Été/Basse) : avril à octobre (mois 4-10)
+
+        Returns:
+            Expression Polars retournant 'H' ou 'B'
+        """
+        return pl.when(
+            (pl.col('Horodate').dt.month() < 4) | (pl.col('Horodate').dt.month() > 10)
+        ).then(pl.lit('H')).otherwise(pl.lit('B'))
+
+    def expr_horaire(plages: list[tuple[time, time]]) -> pl.Expr:
+        """
+        Expression Polars pour déterminer si en Heures Creuses (HC) ou Heures Pleines (HP).
+
+        Args:
+            plages: Liste de tuples (heure_debut, heure_fin) pour les HC
+
+        Returns:
+            Expression Polars retournant 'HC' ou 'HP'
+        """
+        if not plages:
+            # Pas de plages HC définies = tout en HP
+            return pl.lit('HP')
+
+        # Construire la condition : True si dans une des plages HC
+        condition = pl.lit(False)
+
+        for start_time, end_time in plages:
+            heure_courante = pl.col('Horodate').dt.time()
+
+            if start_time < end_time:
+                # Plage normale (ex: 02h00-07h00)
+                condition = condition | (
+                    (heure_courante >= start_time) & (heure_courante <= end_time)
+                )
+            else:
+                # Plage à cheval sur minuit (ex: 22h00-06h00)
+                condition = condition | (
+                    (heure_courante >= start_time) | (heure_courante <= end_time)
+                )
+
+        return pl.when(condition).then(pl.lit('HC')).otherwise(pl.lit('HP'))
+
+    def expr_cadran(plages: list[tuple[time, time]]) -> pl.Expr:
+        """
+        Expression Polars pour déterminer le cadran tarifaire complet.
+
+        Cadrans possibles : HPH, HCH, HPB, HCB
+
+        Args:
+            plages: Liste de tuples (heure_debut, heure_fin) pour les HC
+
+        Returns:
+            Expression Polars retournant le cadran (ex: 'HPH', 'HCB')
+        """
+        return expr_horaire(plages) + expr_saison()
+
+    def enrichir_dataframe(df: pl.DataFrame, plages_hc: list[tuple[time, time]]) -> pl.DataFrame:
+        """
+        Enrichit le DataFrame avec les colonnes pas_heures, volume et cadran.
+
+        Args:
+            df: DataFrame avec colonnes 'Horodate', 'Valeur', 'Pas'
+            plages_hc: Liste de tuples (heure_debut, heure_fin) pour les HC
+
+        Returns:
+            DataFrame enrichi avec colonnes supplémentaires
+        """
+        return (
+            df
+            .with_columns([
+                expr_pas_heures().alias('pas_heures')
+            ])
+            .with_columns([
+                expr_volume().alias('volume'),
+                expr_cadran(plages_hc).alias('cadran')
+            ])
+        )
+    return enrichir_dataframe, expr_depassement
+
+
+@app.cell(hide_code=True)
+def _(expr_depassement, params_turpe, pl):
+    # Fonctions de calcul
+    def fixe_CU(P):
+        """Calcule le coût fixe annuel en option Courte Utilisation (CU)."""
+        return (
+            params_turpe.value["CG"]
+            + params_turpe.value["CC"]
+            + params_turpe.value["CS_CU"] * P
+            ) * (1 + params_turpe.value["CTA"])
+
+    def fixe_LU(P):
+        """Calcule le coût fixe annuel en option Longue Utilisation (LU)."""
+        return (
+            params_turpe.value["CG"]
+            + params_turpe.value["CC"]
+            + params_turpe.value["CS_LU"] * P
+            ) * (1 + params_turpe.value["CTA"])
 
     def calculer_duree_depassement(df: pl.DataFrame, P: float) -> float:
         """
@@ -329,127 +494,6 @@ def _(pl):
             .sum()
             .item()
         )
-    return (calculer_duree_depassement,)
-
-
-@app.cell
-def _(datetime, pl, time):
-    def expr_volume() -> pl.Expr:
-        """
-        Expression Polars pour calculer le volume en kWh.
-
-        volume = Valeur (kW) × pas_heures (h)
-
-        Returns:
-            Expression Polars du volume en kWh
-        """
-        return pl.col('Valeur') * pl.col('pas_heures')
-
-    def expr_saison() -> pl.Expr:
-        """
-        Expression Polars pour déterminer la saison tarifaire.
-
-        - H (Hiver) : novembre à mars (mois < 4 ou > 10)
-        - B (Été/Basse) : avril à octobre (mois 4-10)
-
-        Returns:
-            Expression Polars retournant 'H' ou 'B'
-        """
-        return pl.when(
-            (pl.col('Horodate').dt.month() < 4) | (pl.col('Horodate').dt.month() > 10)
-        ).then(pl.lit('H')).otherwise(pl.lit('B'))
-
-    def parser_plages_horaires(plage_str: str) -> list[tuple[time, time]]:
-        """
-        Parse une chaîne de plages horaires format Enedis.
-
-        Format : "08h00-12h00;14h00-18h00"
-
-        Returns:
-            Liste de tuples (heure_debut, heure_fin)
-        """
-        if not plage_str or plage_str.strip() == '':
-            return []
-
-        plage_str = plage_str.replace(' ', '').replace('(', '').replace(')', '')
-        plages = []
-
-        for slot in plage_str.split(';'):
-            if '-' not in slot:
-                continue
-            start_str, end_str = slot.split('-')
-            start_time = datetime.strptime(start_str, '%Hh%M').time()
-            end_time = datetime.strptime(end_str, '%Hh%M').time()
-            plages.append((start_time, end_time))
-
-        return plages
-
-    def expr_horaire(plage_str: str) -> pl.Expr:
-        """
-        Expression Polars pour déterminer si en Heures Creuses (HC) ou Heures Pleines (HP).
-
-        Args:
-            plage_str: Plages horaires HC format "08h00-12h00;14h00-18h00"
-
-        Returns:
-            Expression Polars retournant 'HC' ou 'HP'
-        """
-        plages = parser_plages_horaires(plage_str)
-
-        if not plages:
-            # Pas de plages HC définies = tout en HP
-            return pl.lit('HP')
-
-        # Construire la condition : True si dans une des plages HC
-        condition = pl.lit(False)
-
-        for start_time, end_time in plages:
-            heure_courante = pl.col('Horodate').dt.time()
-
-            if start_time < end_time:
-                # Plage normale (ex: 02h00-07h00)
-                condition = condition | (
-                    (heure_courante >= start_time) & (heure_courante <= end_time)
-                )
-            else:
-                # Plage à cheval sur minuit (ex: 22h00-06h00)
-                condition = condition | (
-                    (heure_courante >= start_time) | (heure_courante <= end_time)
-                )
-
-        return pl.when(condition).then(pl.lit('HC')).otherwise(pl.lit('HP'))
-
-    def expr_cadran(plage_str: str) -> pl.Expr:
-        """
-        Expression Polars pour déterminer le cadran tarifaire complet.
-
-        Cadrans possibles : HPH, HCH, HPB, HCB
-
-        Args:
-            plage_str: Plages horaires HC format "08h00-12h00;14h00-18h00"
-
-        Returns:
-            Expression Polars retournant le cadran (ex: 'HPH', 'HCB')
-        """
-        return expr_horaire(plage_str) + expr_saison()
-
-    def enrichir_dataframe(df: pl.DataFrame, plage_hc: str) -> pl.DataFrame:
-        """
-        Enrichit le DataFrame avec les colonnes volume, saison, horaire et cadran.
-
-        Args:
-            df: DataFrame avec colonnes 'Horodate', 'Valeur', 'pas_heures'
-            plage_hc: Plages horaires Heures Creuses (ex: "02h00-07h00;22h00-06h00")
-
-        Returns:
-            DataFrame enrichi avec colonnes supplémentaires
-        """
-        return df.with_columns([
-            expr_volume().alias('volume'),
-            expr_saison().alias('saison'),
-            expr_horaire(plage_hc).alias('horaire'),
-            expr_cadran(plage_hc).alias('cadran')
-        ])
 
     def calculer_turpe_variable(df: pl.DataFrame, params: dict, option: str) -> float:
         """
@@ -478,33 +522,22 @@ def _(datetime, pl, time):
             cout_total += volume * tarif
 
         return cout_total
+    return (
+        calculer_duree_depassement,
+        calculer_turpe_variable,
+        fixe_CU,
+        fixe_LU,
+    )
 
-    return calculer_turpe_variable, enrichir_dataframe
 
-
-@app.cell(hide_code=True)
-def _(params_turpe):
-    # Fonctions de calcul
-    def fixe_CU(P):
-        """Calcule le coût fixe annuel en option Courte Utilisation (CU)."""
-        return (
-            params_turpe.value["CG"]
-            + params_turpe.value["CC"]
-            + params_turpe.value["CS_CU"] * P
-            ) * (1 + params_turpe.value["CTA"])
-
-    def fixe_LU(P):
-        """Calcule le coût fixe annuel en option Longue Utilisation (LU)."""
-        return (
-            params_turpe.value["CG"]
-            + params_turpe.value["CC"]
-            + params_turpe.value["CS_LU"] * P
-            ) * (1 + params_turpe.value["CTA"])
-    return fixe_CU, fixe_LU
+@app.cell
+def _(mo):
+    mo.md(r"""## Simulation en fonction de la puissance""")
+    return
 
 
 @app.cell(hide_code=True)
-def _(
+def simulation(
     calculer_duree_depassement,
     calculer_turpe_variable,
     cdc,
@@ -516,53 +549,49 @@ def _(
     plage_puissance,
 ):
     # Simulation TURPE
-    if cdc is not None:
-        # Génération de la plage de puissances
-        P_min, P_max = plage_puissance.value
-        Ps = list(range(P_min, P_max + 1))
+    mo.stop(cdc is None, output=mo.md("⏸️ En attente des données"))
 
-        # Calcul du TURPE variable (identique pour toutes les puissances)
-        params = params_turpe.value
-        cout_variable_cu = calculer_turpe_variable(cdc, params, 'CU')
-        cout_variable_lu = calculer_turpe_variable(cdc, params, 'LU')
+    # Génération de la plage de puissances
+    P_min, P_max = plage_puissance.value
+    Ps = list(range(P_min, P_max + 1))
 
-        # Calcul pour chaque puissance
-        resultats = []
-        for P in Ps:
-            cout_fixe_cu = fixe_CU(P)
-            cout_fixe_lu = fixe_LU(P)
-            duree_depassement_h = calculer_duree_depassement(cdc, P)
-            cout_depassement = duree_depassement_h * params["CMDPS"]
+    # Calcul du TURPE variable (identique pour toutes les puissances)
+    params = params_turpe.value
+    cout_variable_cu = calculer_turpe_variable(cdc, params, 'CU')
+    cout_variable_lu = calculer_turpe_variable(cdc, params, 'LU')
 
-            resultats.append({
-                'PS': P,
-                'CU fixe': cout_fixe_cu,
-                'LU fixe': cout_fixe_lu,
-                'CU variable': cout_variable_cu,
-                'LU variable': cout_variable_lu,
-                'Dépassement': cout_depassement,
-                'Total CU': cout_fixe_cu + cout_variable_cu + cout_depassement,
-                'Total LU': cout_fixe_lu + cout_variable_lu + cout_depassement
-            })
+    # Calcul pour chaque puissance
+    resultats = []
+    for P in Ps:
+        cout_fixe_cu = fixe_CU(P)
+        cout_fixe_lu = fixe_LU(P)
+        duree_depassement_h = calculer_duree_depassement(cdc, P)
+        cout_depassement = duree_depassement_h * params["CMDPS"]
 
-        Simulation = pl.DataFrame(resultats)
+        resultats.append({
+            'PS': P,
+            'CU fixe': cout_fixe_cu,
+            'LU fixe': cout_fixe_lu,
+            'CU variable': cout_variable_cu,
+            'LU variable': cout_variable_lu,
+            'Dépassement': cout_depassement,
+            'Total CU': cout_fixe_cu + cout_variable_cu + cout_depassement,
+            'Total LU': cout_fixe_lu + cout_variable_lu + cout_depassement
+        })
 
-        # Identifier les optimums
-        idx_opt_CU = Simulation['Total CU'].arg_min()
-        P_opt_CU = Simulation['PS'][idx_opt_CU]
-        cout_opt_CU = Simulation['Total CU'][idx_opt_CU]
+    Simulation = pl.DataFrame(resultats)
 
-        idx_opt_LU = Simulation['Total LU'].arg_min()
-        P_opt_LU = Simulation['PS'][idx_opt_LU]
-        cout_opt_LU = Simulation['Total LU'][idx_opt_LU]
+    # Identifier les optimums
+    idx_opt_CU = Simulation['Total CU'].arg_min()
+    P_opt_CU = Simulation['PS'][idx_opt_CU]
+    cout_opt_CU = Simulation['Total CU'][idx_opt_CU]
 
-        msg_simulation = mo.md("✅ Simulation terminée")
-    else:
-        Simulation = None
-        P_opt_CU = P_opt_LU = cout_opt_CU = cout_opt_LU = None
-        msg_simulation = mo.md("⏸️ En attente des données")
+    idx_opt_LU = Simulation['Total LU'].arg_min()
+    P_opt_LU = Simulation['PS'][idx_opt_LU]
+    cout_opt_LU = Simulation['Total LU'][idx_opt_LU]
 
-    msg_simulation
+    mo.md("✅ Simulation terminée")
+
     return P_opt_CU, P_opt_LU, Simulation, cout_opt_CU, cout_opt_LU
 
 
