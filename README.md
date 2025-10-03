@@ -1,12 +1,19 @@
-# Optimisation TURPE - Calcul de Puissance Souscrite Optimale
+# 🔌 Optimisation TURPE C4 - Notebook Marimo Interactif
+
+Application interactive pour déterminer la **puissance souscrite optimale** et la **formule tarifaire d'acheminement** (CU ou LU) qui minimise les coûts annuels d'acheminement électrique.
 
 ## 📋 Vue d'ensemble
 
-Cet outil permet de déterminer la **puissance souscrite optimale** pour un point de livraison électrique en fonction d'une courbe de charge réelle. Il simule les coûts d'acheminement (TURPE) pour différentes puissances et compare les options tarifaires **CU** (Courte Utilisation) et **LU** (Longue Utilisation).
+Cet outil permet de :
+- Analyser une courbe de charge électrique (format Enedis)
+- Simuler les coûts TURPE (fixes + variables + dépassements) pour différentes puissances souscrites
+- Comparer les options **CU** (Courte Utilisation) et **LU** (Longue Utilisation)
+- Identifier la configuration optimale minimisant le coût annuel
 
 ### Objectif
-Minimiser le coût annuel d'acheminement en trouvant le meilleur compromis entre :
+Trouver le meilleur compromis entre :
 - Les **coûts fixes** (qui augmentent avec la puissance souscrite)
+- Les **coûts variables** (fonction de la consommation par cadran tarifaire)
 - Les **coûts de dépassement** (qui diminuent avec une puissance souscrite plus élevée)
 
 ---
@@ -14,71 +21,90 @@ Minimiser le coût annuel d'acheminement en trouvant le meilleur compromis entre
 ## 🚀 Installation
 
 ### Prérequis
-- Python 3.7+
-- pandas
-- matplotlib
-- openpyxl (pour l'export Excel)
+- Python 3.10+
+- [Marimo](https://marimo.io) - Framework de notebooks interactifs
+- Polars - Manipulation rapide de DataFrames
+- Altair - Visualisations interactives
 
 ### Installation des dépendances
 
 ```bash
-pip install pandas matplotlib openpyxl
+pip install marimo polars altair
 ```
 
 ---
 
 ## 📊 Format du fichier d'entrée
 
-Le script attend un fichier CSV au **format Enedis** avec les colonnes suivantes :
+Le notebook attend un fichier **CSV au format Enedis R63** avec les colonnes suivantes :
 
-| Horodate | Grandeur physique | Valeur |
-|----------|-------------------|--------|
-| 2024-01-01 00:00:00 | PA | 45000 |
-| 2024-01-01 00:10:00 | PA | 47500 |
+| Horodate | Grandeur physique | Valeur | Pas |
+|----------|-------------------|--------|-----|
+| 2024-01-01 00:00:00 | PA | 45000 | PT5M |
+| 2024-01-01 00:05:00 | PA | 47500 | PT5M |
 
 ### Spécifications
 - **Séparateur** : point-virgule (`;`)
 - **Horodate** : Format `YYYY-MM-DD HH:MM:SS`
-- **Grandeur physique** : `PA` (Puissance Active)
-- **Valeur** : Puissance en Watts (kVA)
-- **Période** : Minimum 1 an de données pour une analyse complète
-
-### Configuration
-Modifiez la variable `FILE` dans le script pour pointer vers votre fichier :
-
-```python
-FILE = 'atalante.csv'  # Remplacez par le nom de votre fichier
-```
+- **Grandeur physique** : `PA` (Puissance Active uniquement)
+- **Valeur** : Puissance en Watts (W) - convertie automatiquement en kW
+- **Pas** : Format ISO 8601 (ex: `PT5M` pour 5 minutes, `PT10M` pour 10 minutes)
+- **Période** : Minimum 1 an de données pour une analyse représentative
 
 ---
 
 ## 🔧 Utilisation
 
-### Exécution simple
+### Lancer le notebook
 
 ```bash
-python "opti C4.py"
+marimo edit notebook.py
 ```
 
-### Sorties générées
+Le notebook s'ouvre dans votre navigateur avec une interface interactive.
 
-1. **Graphique** : Affiche les courbes de coût total en fonction de la puissance souscrite (CU vs LU)
-2. **Fichier Excel** : `Simulation.xlsx` contenant le tableau détaillé des simulations
+### Workflow
+
+1. **Upload du fichier CSV** : Glissez-déposez votre fichier R63 dans la zone de téléchargement
+2. **Configuration des paramètres TURPE** : Ajustez les tarifs si nécessaire (valeurs par défaut fournies)
+3. **Plage de puissances** : Définissez l'intervalle de puissances à tester (ex: 36-66 kW)
+4. **Plages horaires HC** : Configurez les heures creuses (format : `02h00-07h00`)
+5. **Analyse automatique** : Le notebook calcule et affiche :
+   - Les statistiques de consommation par cadran tarifaire
+   - La simulation pour toutes les puissances de la plage
+   - Le graphique interactif des coûts
+   - La recommandation optimale
+6. **Export** : Téléchargez les résultats au format Excel
 
 ---
 
-## 📈 Paramètres TURPE (version actuelle)
+## 📈 Paramètres TURPE
 
-Le script utilise les composantes tarifaires suivantes :
+Le notebook utilise les composantes tarifaires suivantes (modifiables via l'interface) :
 
-| Paramètre | Description | Valeur (€) |
-|-----------|-------------|-----------|
-| `CG` | Composante de gestion | 217,80 |
-| `CC` | Composante de comptage | 283,27 |
-| `CS_CU` | Composante de soutirage CU (€/kW) | 17,61 |
-| `CS_LU` | Composante de soutirage LU (€/kW) | 30,16 |
-| `CMDPS` | Coût de dépassement mensuel (€/h) | 12,41 |
-| `CTA` | Contribution Tarifaire d'Acheminement | 1,2193 |
+### Composantes fixes annuelles
+
+| Paramètre | Description | Valeur par défaut |
+|-----------|-------------|-------------------|
+| `CG` | Composante de gestion | 217,80 € |
+| `CC` | Composante de comptage | 283,27 € |
+| `CS_CU` | Coefficient pondérateur puissance CU | 17,61 €/kVA/an |
+| `CS_LU` | Coefficient pondérateur puissance LU | 30,16 €/kVA/an |
+| `CMDPS` | Coût mensuel dépassement | 12,41 €/h |
+| `CTA` | Contribution Tarifaire d'Acheminement | 0,2193 (21,93%) |
+
+### Composantes variables (c€/kWh)
+
+| Cadran | CU | LU |
+|--------|----|----|
+| **HPH** (Heures Pleines Hiver) | 6,91 | 5,69 |
+| **HCH** (Heures Creuses Hiver) | 4,21 | 3,47 |
+| **HPB** (Heures Pleines Basse saison) | 2,13 | 2,01 |
+| **HCB** (Heures Creuses Basse saison) | 1,52 | 1,49 |
+
+**Saisons** :
+- **Hiver (H)** : novembre à mars
+- **Basse saison (B)** : avril à octobre
 
 > ⚠️ **Note** : Ces tarifs évoluent régulièrement. Vérifiez sur le site de la CRE pour les valeurs à jour.
 
@@ -90,118 +116,157 @@ Le script utilise les composantes tarifaires suivantes :
 
 **Courte Utilisation (CU)** :
 ```
-Coût_fixe_CU = (CG + CC + CS_CU × P) × CTA
+Coût_fixe_CU = (CG + CC + CS_CU × P) × (1 + CTA)
 ```
 
 **Longue Utilisation (LU)** :
 ```
-Coût_fixe_LU = (CG + CC + CS_LU × P) × CTA
+Coût_fixe_LU = (CG + CC + CS_LU × P) × (1 + CTA)
 ```
 
-### 2. Coût de dépassement
+### 2. Coût variable annuel
 
-Pour chaque heure où la puissance mesurée dépasse la puissance souscrite :
+Pour chaque mesure :
 ```
-Coût_dépassement = Nombre_heures_dépassement × CMDPS
+Volume_kWh = Puissance_kW × Pas_heures
 ```
 
-### 3. Coût total annuel
+Coût variable total :
+```
+Coût_variable = Σ(Volume_cadran × Tarif_cadran)
+```
+
+Où les cadrans sont : HPH, HCH, HPB, HCB
+
+### 3. Coût de dépassement
+
+Pour chaque période où la puissance mesurée dépasse la puissance souscrite :
+```
+Coût_dépassement = Durée_dépassement_heures × CMDPS
+```
+
+### 4. Coût total annuel
 
 ```
-Coût_total = Coût_fixe + Coût_dépassement
+Coût_total = Coût_fixe + Coût_variable + Coût_dépassement
 ```
 
 ---
 
 ## 📊 Interprétation des résultats
 
-### Le fichier Simulation.xlsx
+### Le graphique interactif
+
+Affiche les courbes de coût total en fonction de la puissance souscrite :
+- **Courbe bleue** : Option CU (Courte Utilisation)
+- **Courbe orange** : Option LU (Longue Utilisation)
+
+Les points correspondent aux puissances testées. Survolez-les pour voir les détails.
+
+### La recommandation
+
+Le notebook affiche automatiquement :
+```
+✅ RECOMMANDATION
+Souscrire 52 kW en option LU
+- Coût annuel : 1 180,45 €/an
+- Économie vs autre option : 70,00 €/an
+```
+
+### Le fichier Excel exporté
+
+Contient un tableau détaillé avec toutes les simulations :
 
 | Colonne | Description |
 |---------|-------------|
 | `PS` | Puissance souscrite testée (kW) |
 | `CU fixe` | Coût fixe annuel en option CU (€) |
 | `LU fixe` | Coût fixe annuel en option LU (€) |
+| `CU variable` | Coût variable annuel en option CU (€) |
+| `LU variable` | Coût variable annuel en option LU (€) |
 | `Dépassement` | Coût annuel des dépassements (€) |
 | `Total CU` | Coût total annuel en option CU (€) |
 | `Total LU` | Coût total annuel en option LU (€) |
 
-### Comment choisir la puissance optimale ?
+---
 
-1. **Regardez le graphique** : Identifiez le point le plus bas de chaque courbe
-2. **Comparez CU vs LU** : Déterminez quelle option tarifaire est la plus avantageuse
-3. **Analysez le tableau** :
-   - La puissance optimale CU correspond au minimum de la colonne `Total CU`
-   - La puissance optimale LU correspond au minimum de la colonne `Total LU`
+## 🏗️ Architecture technique
 
-### Exemple d'analyse
+### Structure du notebook
 
-```
-Puissance optimale CU : 48 kW → 1 250 €/an
-Puissance optimale LU : 52 kW → 1 180 €/an
+Le notebook Marimo est organisé en cellules réactives :
 
-→ Recommandation : Souscrire 52 kW en option LU (économie de 70 €/an)
-```
+1. **Imports et configuration** - Librairies nécessaires
+2. **Paramètres d'entrée** - Widgets interactifs pour la configuration
+3. **Chargement des données brutes** - Parsing du CSV, validation
+4. **Enrichissement** - Calcul des cadrans tarifaires, volumes par cadran
+5. **Fonctions de calcul** - Expressions Polars pour les transformations
+6. **Simulation** - Calcul des coûts pour chaque puissance
+7. **Résultats** - Affichage graphique et recommandation
+8. **Export** - Téléchargement Excel
+
+### Technologies utilisées
+
+- **Marimo** : Framework de notebooks réactifs (pas de cellule "en attente", tout est synchronisé)
+- **Polars** : Manipulation ultra-rapide de DataFrames (alternative moderne à pandas)
+- **Altair** : Visualisations déclaratives et interactives
+- **Expressions Polars** : Transformations lazy et optimisées (pas de boucles Python)
+
+### Avantages de l'approche
+
+- ✅ **Réactivité** : Changez un paramètre, tout se recalcule automatiquement
+- ✅ **Performance** : Polars traite des millions de lignes en secondes
+- ✅ **Clarté** : Code fonctionnel avec expressions déclaratives
+- ✅ **Reproductibilité** : Les notebooks Marimo sont des fichiers Python standards
 
 ---
 
-## ⚙️ Personnalisation
+## ⚙️ Personnalisation avancée
 
-### Modifier la plage de puissances testées
+### Modifier les plages horaires HC
 
-Par défaut, le script teste les puissances de 36 à 66 kW. Pour modifier :
+Format attendu : `HHhMM-HHhMM` séparé par `;`
 
-```python
-Ps = list(range(36, 66))  # Remplacez par votre plage souhaitée
-# Exemple : Ps = list(range(20, 100))  # Teste de 20 à 100 kW
-```
+Exemples :
+- Une plage : `02h00-07h00`
+- Deux plages : `02h00-07h00;22h00-06h00`
+- Plage à cheval sur minuit : `22h00-06h00`
 
-### Mettre à jour les tarifs TURPE
+### Adapter les cadrans tarifaires
 
-Modifiez les constantes en début de script avec les tarifs actuels :
+Les fonctions d'enrichissement se trouvent dans la cellule `fonctions_enrichissement` :
+- `expr_saison()` : Détermine Hiver (H) ou Basse saison (B)
+- `expr_horaire()` : Détermine Heures Pleines (HP) ou Heures Creuses (HC)
+- `expr_cadran()` : Combine les deux (HPH, HCH, HPB, HCB)
 
-```python
-CG = 217.8
-CC = 283.27
-CS_CU = 17.61
-CS_LU = 30.16
-CMDPS = 12.41
-CTA = 1.2193
-```
+Modifiez ces fonctions pour adapter à d'autres grilles tarifaires.
 
 ---
 
 ## 🐛 Résolution de problèmes
 
-### Erreur : `FileNotFoundError`
-➡️ Vérifiez que le fichier CSV existe et que le nom est correct dans `FILE`
+### Le fichier ne se charge pas
+➡️ Vérifiez :
+- Le séparateur est bien `;`
+- Les colonnes requises sont présentes : `Horodate`, `Grandeur physique`, `Valeur`, `Pas`
+- Les données PA (Puissance Active) sont présentes
 
-### Erreur : `KeyError: 'Grandeur physique'`
-➡️ Vérifiez que le fichier CSV contient bien les colonnes attendues
+### Erreur "Colonnes manquantes"
+➡️ Le CSV doit contenir exactement les colonnes attendues du format Enedis R63
 
-### Le graphique ne s'affiche pas
-➡️ Ajoutez `plt.show()` à la fin du script ou exécutez dans un environnement interactif
+### Pas de données après filtrage
+➡️ Assurez-vous que la colonne `Grandeur physique` contient des lignes avec la valeur `PA`
 
-### Résultats incohérents
-➡️ Assurez-vous d'avoir au moins 1 an de données dans la courbe de charge
+### Les cadrans ne sont pas corrects
+➡️ Vérifiez le format des plages horaires HC (ex: `02h00-07h00`)
+
+### Les coûts semblent anormaux
+➡️ Vérifiez que les paramètres TURPE correspondent bien à votre tarif actuel
 
 ---
 
 ## 📚 Ressources
 
-- [Tarifs TURPE - CRE](https://www.cre.fr/Electricite/Reseaux-d-electricite/tarifs-d-acces-aux-reseaux-publics-d-electricite)
-- [Format des données Enedis](https://www.enedis.fr/courbe-de-charge)
+- [Documentation Marimo](https://docs.marimo.io)
+- [Documentation Polars](https://pola-rs.github.io/polars-book/)
 
----
-
-## 📝 Notes importantes
-
-- ⚠️ La variable `P` (ligne 66) n'est pas définie dans le script actuel. Elle doit être initialisée ou le code corrigé pour fonctionner correctement.
-- 📅 Les données doivent couvrir une période d'un an pour une simulation représentative
-- 💡 L'option CU est généralement plus avantageuse pour les faibles utilisations, LU pour les fortes utilisations
-
----
-
-## 🤝 Support
-
-Pour toute question ou amélioration, contactez l'auteur : Hamza
