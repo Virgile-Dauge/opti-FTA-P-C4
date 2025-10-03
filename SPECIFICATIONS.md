@@ -8,11 +8,6 @@
 
 ## 📋 Contexte du projet
 
-### Origine
-- Script initié par **Hamza** pour l'optimisation des puissances souscrites en **tarif C4**
-- Script incomplet, nécessitant finalisation et industrialisation
-- **Besoin récurrent** d'analyses d'optimisation pour les clients
-
 ### Problématique métier
 Déterminer la **puissance souscrite optimale** et la **formule tarifaire d'acheminement** (CU ou LU) qui minimise les coûts annuels d'acheminement électrique, en tenant compte :
 - Des coûts fixes (proportionnels à la puissance souscrite)
@@ -38,7 +33,7 @@ Déterminer la **puissance souscrite optimale** et la **formule tarifaire d'ache
   - `Grandeur physique` : "PA" (Puissance Active)
   - `Valeur` : Puissance en Watts (W)
 - **Période** : Minimum 1 an de données
-- **Fréquence** : Pas de 10 minutes (standard Enedis pour C4)
+- **Fréquence** : Pas de 5 minutes
 
 ### 2. Situation actuelle du client (paramètres)
 - **P actuelle** : Puissance souscrite actuelle (kW)
