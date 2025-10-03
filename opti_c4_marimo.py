@@ -41,7 +41,7 @@ def _(mo):
     file_upload = mo.ui.file(
         filetypes=[".csv"],
         kind="area",
-        label="Sélectionnez votre fichier CSV au format Enedis"
+        label="Sélectionnez votre fichier CSV R63"
     )
     file_upload
     return (file_upload,)
@@ -75,14 +75,14 @@ def _(mo):
             stop=100,
             step=0.01,
             value=17.61,
-            label="CS_CU - Composante soutirage Courte Utilisation (€/kW/an)"
+            label="CS_CU - Coefficient pondérateur de la puissance Courte Utilisation (€/kVA/an)"
         ),
         "CS_LU": mo.ui.number(
             start=0,
             stop=100,
             step=0.01,
             value=30.16,
-            label="CS_LU - Composante soutirage Longue Utilisation (€/kW/an)"
+            label="CS_LU - Coefficient pondérateur de la puissance Longue Utilisation (€/kVA/an)"
         ),
         "CMDPS": mo.ui.number(
             start=0,
@@ -92,10 +92,10 @@ def _(mo):
             label="CMDPS - Coût mensuel dépassement (€/h)"
         ),
         "CTA": mo.ui.number(
-            start=1,
-            stop=2,
+            start=0,
+            stop=0.5,
             step=0.0001,
-            value=1.2193,
+            value=0.2193,
             label="CTA - Contribution Tarifaire d'Acheminement"
         ),
         # Tarifs TURPE variable par cadran (c€/kWh)
@@ -103,57 +103,57 @@ def _(mo):
             start=0,
             stop=50,
             step=0.01,
-            value=1.54,
+            value=6.91,
             label="HPH CU - Heures Pleines Hiver (c€/kWh)"
         ),
         "HCH_CU": mo.ui.number(
             start=0,
             stop=50,
             step=0.01,
-            value=1.07,
+            value=4.21,
             label="HCH CU - Heures Creuses Hiver (c€/kWh)"
         ),
-        "HPE_CU": mo.ui.number(
+        "HPB_CU": mo.ui.number(
             start=0,
             stop=50,
             step=0.01,
-            value=1.05,
-            label="HPE CU - Heures Pleines Été (c€/kWh)"
+            value=2.13,
+            label="HPB CU - Heures Pleines Basse saison (c€/kWh)"
         ),
-        "HCE_CU": mo.ui.number(
+        "HCB_CU": mo.ui.number(
             start=0,
             stop=50,
             step=0.01,
-            value=0.82,
-            label="HCE CU - Heures Creuses Été (c€/kWh)"
+            value=1.52,
+            label="HCB CU - Heures Creuses Basse saison (c€/kWh)"
         ),
         "HPH_LU": mo.ui.number(
             start=0,
             stop=50,
             step=0.01,
-            value=0.75,
+            value=5.69,
             label="HPH LU - Heures Pleines Hiver (c€/kWh)"
         ),
         "HCH_LU": mo.ui.number(
             start=0,
             stop=50,
             step=0.01,
-            value=0.52,
+            value=3.47,
             label="HCH LU - Heures Creuses Hiver (c€/kWh)"
         ),
-        "HPE_LU": mo.ui.number(
+        "HPB_LU": mo.ui.number(
             start=0,
             stop=50,
             step=0.01,
-            value=0.51,
-            label="HPE LU - Heures Pleines Été (c€/kWh)"
+            value=2.01,
+            label="HPB LU - Heures Pleines Basse saison (c€/kWh)"
         ),
-        "HCE_LU": mo.ui.number(
+        "HCB_LU": mo.ui.number(
             start=0,
             stop=50,
             step=0.01,
-            value=0.40,
-            label="HCE LU - Heures Creuses Été (c€/kWh)"
+            value=1.49,
+            label="HCB LU - Heures Creuses Basse saison (c€/kWh)"
         ),
     })
     params_turpe
@@ -199,94 +199,86 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(enrichir_dataframe, file_upload, io, mo, pl, plage_hc_input):
-    # Traitement du fichier CSV uploadé
-    if file_upload.value is None:
-        cdc = None
-        msg_data = mo.md("⚠️ Veuillez uploader un fichier CSV pour commencer l'analyse")
-    else:
-        try:
-            # Lire le contenu du fichier
-            csv_content = file_upload.contents()
+def _(file_upload, io, mo, pl):
+    # Chargement des données brutes
+    mo.stop(not file_upload.value, mo.md("⚠️ Veuillez uploader un fichier CSV pour commencer l'analyse"))
 
-            # Parser avec Polars
-            cdc_raw = pl.read_csv(io.BytesIO(csv_content), separator=';')
+    csv_content = file_upload.contents()
+    _cdc_tmp = pl.read_csv(io.BytesIO(csv_content), separator=';')
 
-            # Vérification colonnes
-            colonnes_requises = ['Horodate', 'Grandeur physique', 'Valeur', 'Pas']
-            colonnes_manquantes = [col for col in colonnes_requises if col not in cdc_raw.columns]
+    # Vérification colonnes
+    colonnes_requises = ['Horodate', 'Grandeur physique', 'Valeur', 'Pas']
+    colonnes_manquantes = [col for col in colonnes_requises if col not in _cdc_tmp.columns]
 
-            if colonnes_manquantes:
-                cdc = None
-                msg_data = mo.md(f"❌ Colonnes manquantes : {', '.join(colonnes_manquantes)}")
-            else:
-                # Filtrer PA et convertir
-                cdc = (
-                    cdc_raw
-                    .filter(pl.col('Grandeur physique') == 'PA')
-                    .with_columns([
-                        pl.col('Horodate').str.strptime(pl.Datetime, '%Y-%m-%d %H:%M:%S'),
-                        (pl.col('Valeur') / 1000.0).alias('Valeur'),  # Watts -> kW
-                        # Calculer le pas en heures dès le chargement
-                        (
-                            pl.col('Pas')
-                            .str.strip_prefix('PT')
-                            .str.strip_suffix('M')
-                            .cast(pl.Int32)
-                            / 60.0
-                        ).alias('pas_heures')
-                    ])
-                    .select([
-                        'Horodate',
-                        'Valeur',
-                        'Pas',
-                        'pas_heures'
-                    ])
-                )
+    mo.stop(colonnes_manquantes, mo.md(f"❌ Colonnes manquantes : {', '.join(colonnes_manquantes)}"))
 
-                if cdc.is_empty():
-                    cdc = None
-                    msg_data = mo.md("❌ Aucune donnée de Puissance Active (PA) trouvée")
-                else:
-                    # Enrichir avec volume, saison, horaire, cadran
-                    cdc = enrichir_dataframe(cdc, plage_hc_input.value)
+    # Filtrer PA et convertir uniquement les données de base
+    cdc_brut = (
+        _cdc_tmp
+        .filter(pl.col('Grandeur physique') == 'PA')
+        .with_columns([
+            pl.col('Horodate').str.strptime(pl.Datetime, '%Y-%m-%d %H:%M:%S'),
+            (pl.col('Valeur') / 1000.0).alias('Valeur'),  # Watts -> kW
+        ])
+        .select(['Horodate', 'Valeur', 'Pas'])
+    )
 
-                    duree_jours = (cdc['Horodate'].max() - cdc['Horodate'].min()).days
-                    warning = f"⚠️ Seulement {duree_jours} jours de données (recommandé : 365 jours)" if duree_jours < 365 else ""
+    mo.stop(cdc_brut.is_empty(), mo.md("❌ Aucune donnée de Puissance Active (PA) trouvée"))
 
-                    # Extraire le pas de temps
-                    pas_exemple = cdc['Pas'][0]
-                    pas_uniques = cdc['Pas'].n_unique()
-                    warning_pas = f"\n⚠️ Attention : {pas_uniques} pas de temps différents détectés" if pas_uniques > 1 else ""
+    mo.md(f"""
+    ✅ **Données brutes chargées**
 
-                    # Statistiques par cadran
-                    stats_cadrans = cdc.group_by('cadran').agg([
-                        pl.col('volume').sum().alias('volume_total')
-                    ]).sort('cadran')
+    - Nombre de mesures : {len(cdc_brut):,}
+    - Période : {cdc_brut['Horodate'].min()} → {cdc_brut['Horodate'].max()}
+    - Puissance max : {cdc_brut['Valeur'].max():.2f} kW
+    """)
+    return (cdc_brut,)
 
-                    cadrans_str = "\n".join([
-                        f"     - {row['cadran']} : {row['volume_total']:.0f} kWh"
-                        for row in stats_cadrans.iter_rows(named=True)
-                    ])
 
-                    msg_data = mo.md(f"""
-                    ✅ **Données chargées avec succès**
+@app.cell(hide_code=True)
+def _(cdc_brut, enrichir_dataframe, mo, pl, plage_hc_input):
+    # Enrichissement des données avec cadrans tarifaires
+    # Calculer le pas en heures
+    _cdc_avec_pas = cdc_brut.with_columns([
+        (
+            pl.col('Pas')
+            .str.strip_prefix('PT')
+            .str.strip_suffix('M')
+            .cast(pl.Int32)
+            / 60.0
+        ).alias('pas_heures')
+    ])
 
-                    - Nombre de mesures : {len(cdc):,}
-                    - Période : {cdc['Horodate'].min()} → {cdc['Horodate'].max()}
-                    - Puissance max : {cdc['Valeur'].max():.2f} kW
-                    - Pas de temps : {pas_exemple} {warning_pas}
+    # Enrichir avec volume, saison, horaire, cadran
+    cdc = enrichir_dataframe(_cdc_avec_pas, plage_hc_input.value)
 
-                    **Consommation par cadran tarifaire :**
-    {cadrans_str}
+    duree_jours = (cdc['Horodate'].max() - cdc['Horodate'].min()).days
+    warning = f"\n⚠️ Seulement {duree_jours} jours de données (recommandé : 365 jours)" if duree_jours < 365 else ""
 
-                    {warning}
-                    """)
-        except Exception as e:
-            cdc = None
-            msg_data = mo.md(f"❌ Erreur lors de la lecture du fichier : {str(e)}")
+    # Extraire le pas de temps
+    pas_exemple = cdc['Pas'][0]
+    pas_uniques = cdc['Pas'].n_unique()
+    warning_pas = f"\n⚠️ Attention : {pas_uniques} pas de temps différents détectés" if pas_uniques > 1 else ""
 
-    msg_data
+    # Statistiques par cadran
+    stats_cadrans = cdc.group_by('cadran').agg([
+        pl.col('volume').sum().alias('volume_total')
+    ]).sort('cadran')
+
+    cadrans_str = "\n".join([
+        f"     - {row['cadran']} : {row['volume_total']:.0f} kWh"
+        for row in stats_cadrans.iter_rows(named=True)
+    ])
+
+    mo.md(f"""
+    ✅ **Données enrichies avec succès**
+
+    - Pas de temps : {pas_exemple}{warning_pas}
+
+    **Consommation par cadran tarifaire :**
+{cadrans_str}
+{warning}
+    """)
     return (cdc,)
 
 
@@ -495,11 +487,19 @@ def _(params_turpe):
     # Fonctions de calcul
     def fixe_CU(P):
         """Calcule le coût fixe annuel en option Courte Utilisation (CU)."""
-        return (params_turpe.value["CG"] + params_turpe.value["CC"] + params_turpe.value["CS_CU"] * P) * params_turpe.value["CTA"]
+        return (
+            params_turpe.value["CG"]
+            + params_turpe.value["CC"]
+            + params_turpe.value["CS_CU"] * P
+            ) * (1 + params_turpe.value["CTA"])
 
     def fixe_LU(P):
         """Calcule le coût fixe annuel en option Longue Utilisation (LU)."""
-        return (params_turpe.value["CG"] + params_turpe.value["CC"] + params_turpe.value["CS_LU"] * P) * params_turpe.value["CTA"]
+        return (
+            params_turpe.value["CG"]
+            + params_turpe.value["CC"]
+            + params_turpe.value["CS_LU"] * P
+            ) * (1 + params_turpe.value["CTA"])
     return fixe_CU, fixe_LU
 
 
