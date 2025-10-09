@@ -128,7 +128,7 @@ def _():
         start=3,
         stop=250,
         step=1,
-        value=[36, 100],
+        value=[3, 250],
         label="Puissances à simuler (kVA)",
         show_value=True
     )
@@ -374,6 +374,7 @@ def _(cdc):
         .agg([
             pl.col('Horodate').min().alias('date_debut'),
             pl.col('Horodate').max().alias('date_fin'),
+            pl.col('Valeur').max().alias('pmax'),
         ])
     )
 
@@ -406,6 +407,8 @@ def _(cdc):
         })
         # Remplir les valeurs manquantes par 0 (si un cadran n'existe pas)
         .with_columns([
+            # Calculer le nombre de jours de la période
+            (pl.col('date_fin') - pl.col('date_debut')).dt.total_days().alias('nb_jours'),
             pl.col('energie_hph_kwh').fill_null(0).floor(),
             pl.col('energie_hch_kwh').fill_null(0).floor(),
             pl.col('energie_hpb_kwh').fill_null(0).floor(),
@@ -443,34 +446,41 @@ def _():
 
 
 @app.cell(hide_code=True)
-def _(consos_agregees, plage_puissance):
+def _(cdc, consos_agregees, plage_puissance):
     # Génération de tous les scénarios (puissances × FTA)
 
     P_min, P_max = plage_puissance.value
     puissances = list(range(P_min, P_max + 1))
 
-    # Créer une dataframe de base avec toutes les puissances
-    scenarios_base = (
-        consos_agregees
-        .select(['pdl', 'date_debut', 'date_fin',
-                 'energie_hph_kwh', 'energie_hch_kwh',
-                 'energie_hpb_kwh', 'energie_hcb_kwh'])
-        .with_columns([
-            pl.lit(puissances).alias('puissance_souscrite')
-        ])
-        .explode('puissance_souscrite')
-    )
-
-    # Mapper les FTA selon la puissance
+    # Créer une dataframe avec toutes les puissances
     scenarios = (
-        scenarios_base
+        consos_agregees
+        .select(['pdl', 'energie_hph_kwh', 'energie_hch_kwh',
+                 'energie_hpb_kwh', 'energie_hcb_kwh', 'pmax'])
         .with_columns([
-            pl.when(pl.col('puissance_souscrite') < 36)
+            # Dates projectives pour tous les scénarios (compatibilité TURPE rules)
+            pl.lit(datetime(2025, 8, 1)).dt.replace_time_zone('Europe/Paris').alias('date_debut'),
+            pl.lit(datetime(2026, 7, 31)).dt.replace_time_zone('Europe/Paris').alias('date_fin'),
+            pl.lit(365).alias('nb_jours'),
+            pl.lit(puissances).alias('puissance_souscrite_kva')
+        ])
+        .explode('puissance_souscrite_kva')
+        .with_columns([
+            pl.when(pl.col('puissance_souscrite_kva') < 36)
             .then(pl.lit(['BTINFCU4', 'BTINFMU4', 'BTINFLU']))
             .otherwise(pl.lit(['BTSUPCU', 'BTSUPLU']))
             .alias('formule_tarifaire_acheminement')
         ])
         .explode('formule_tarifaire_acheminement')
+        .with_columns([
+            # Calculer durée dépassement pour chaque ligne
+            pl.struct(['puissance_souscrite_kva'])
+            .map_elements(
+                lambda row: calculer_duree_depassement_df(cdc, row['puissance_souscrite_kva']),
+                return_dtype=pl.Float64
+            )
+            .alias('duree_depassement_h')
+        ])
     )
 
     _nb_scenarios = len(scenarios)
@@ -485,18 +495,6 @@ def _(consos_agregees, plage_puissance):
     - FTA testées : BTINFCU4, BTINFMU4, BTINFLU, (< 36 kVA) + BTSUPCU, BTSUPLU (≥ 36 kVA)
     """)
     return (scenarios,)
-
-
-@app.cell
-def _(scenarios):
-    scenarios
-    return
-
-
-@app.cell
-def _():
-    mo.md(r"""## 🧮 Calcul TURPE avec electricore""")
-    return
 
 
 @app.function(hide_code=True)
@@ -520,41 +518,64 @@ def calculer_duree_depassement_df(cdc: pl.DataFrame, puissance_kw: float) -> flo
     )
 
 
+@app.cell
+def _(scenarios):
+    scenarios
+    return
+
+
+@app.cell
+def _():
+    mo.md(r"""## 🧮 Calcul TURPE avec electricore""")
+    return
+
+
 @app.cell(hide_code=True)
-def _(cdc, scenarios):
+def _(scenarios):
     # Charger les règles TURPE une seule fois
     regles_turpe = load_turpe_rules()
 
-    # Calcul des durées de dépassement pour chaque scénario
-    # Note: Pour C4, la durée de dépassement est utilisée dans le calcul du turpe variable
-    scenarios_avec_depassement = (
-        scenarios
-        .with_columns([
-            # Calculer durée dépassement pour chaque ligne
-            pl.struct(['puissance_souscrite'])
-            .map_elements(
-                lambda row: calculer_duree_depassement_df(cdc, row['puissance_souscrite']),
-                return_dtype=pl.Float64
-            )
-            .alias('duree_depassement_h')
-        ])
-    )
-
     # Calcul TURPE via electricore
+    # Préparer les données au format attendu par electricore
     resultats = (
-        scenarios_avec_depassement
+        scenarios
+        .rename({
+            'date_debut': 'debut',
+            'date_fin': 'fin'
+        })
+        .with_columns([
+            # Ajouter timezone Europe/Paris pour compatibilité avec electricore
+            pl.col('debut').dt.replace_time_zone('Europe/Paris').alias('debut'),
+            pl.col('fin').dt.replace_time_zone('Europe/Paris').alias('fin'),
+        ])
+        .with_columns([
+            # Ajouter les colonnes agrégées pour formules C5 (HP/HC/Base)
+            (pl.col('energie_hph_kwh') + pl.col('energie_hpb_kwh')).alias('energie_hp_kwh'),
+            (pl.col('energie_hch_kwh') + pl.col('energie_hcb_kwh')).alias('energie_hc_kwh'),
+            (pl.col('energie_hph_kwh') + pl.col('energie_hch_kwh') +
+             pl.col('energie_hpb_kwh') + pl.col('energie_hcb_kwh')).alias('energie_base_kwh'),
+            # Pour C4 : initialiser les 4 puissances souscrites par cadran
+            # (identiques pour commencer, l'utilisateur peut optimiser ensuite)
+            pl.col('puissance_souscrite_kva').alias('puissance_souscrite_hph_kva'),
+            pl.col('puissance_souscrite_kva').alias('puissance_souscrite_hch_kva'),
+            pl.col('puissance_souscrite_kva').alias('puissance_souscrite_hpb_kva'),
+            pl.col('puissance_souscrite_kva').alias('puissance_souscrite_hcb_kva'),
+        ])
         .lazy()
         .pipe(ajouter_turpe_fixe, regles=regles_turpe)
         .pipe(ajouter_turpe_variable, regles=regles_turpe)
         .with_columns([
-            (pl.col('turpe_fixe') + pl.col('turpe_variable')).alias('turpe_total')
+            # Renommer pour cohérence (electricore utilise suffixe _eur)
+            # pl.col('turpe_fixe_eur').alias('turpe_fixe'),
+            # pl.col('turpe_variable_eur').alias('turpe_variable'),
+            (pl.col('turpe_fixe_eur') + pl.col('turpe_variable_eur')).alias('turpe_total_eur')
         ])
         .collect()
     )
 
     _nb_resultats = len(resultats)
-    _cout_min = resultats['turpe_total'].min()
-    _cout_max = resultats['turpe_total'].max()
+    _cout_min = resultats['turpe_total_eur'].min()
+    _cout_max = resultats['turpe_total_eur'].max()
 
     mo.md(f"""
     ✅ **Calculs TURPE terminés**
@@ -567,6 +588,12 @@ def _(cdc, scenarios):
 
 
 @app.cell
+def _(resultats):
+    resultats
+    return
+
+
+@app.cell
 def _():
     mo.md(r"""## 🎯 Résultats et recommandations""")
     return
@@ -575,7 +602,7 @@ def _():
 @app.cell(hide_code=True)
 def _(resultats):
     # Trouver l'optimum global (toutes FTA confondues)
-    idx_opt = resultats['turpe_total'].arg_min()
+    idx_opt = resultats['turpe_total_eur'].arg_min()
     optimum = resultats[idx_opt]
 
     # Optimums par FTA
@@ -583,12 +610,12 @@ def _(resultats):
         resultats
         .group_by(['pdl', 'formule_tarifaire_acheminement'])
         .agg([
-            pl.col('turpe_total').min().alias('cout_min'),
-            pl.col('puissance_souscrite').filter(
-                pl.col('turpe_total') == pl.col('turpe_total').min()
+            pl.col('turpe_total_eur').min().alias('cout_min_eur'),
+            pl.col('puissance_souscrite_kva').filter(
+                pl.col('turpe_total_eur') == pl.col('turpe_total_eur').min()
             ).first().alias('puissance_opt'),
         ])
-        .sort('cout_min')
+        .sort('cout_min_eur')
     )
 
     mo.md(f"""
@@ -596,11 +623,11 @@ def _(resultats):
 
     **Meilleure configuration** :
     - **PDL** : `{optimum['pdl'][0]}`
-    - **Puissance souscrite** : **{optimum['puissance_souscrite'][0]:.0f} kVA**
+    - **Puissance souscrite** : **{optimum['puissance_souscrite_kva'][0]:.0f} kVA**
     - **Formule tarifaire** : **{optimum['formule_tarifaire_acheminement'][0]}**
-    - **Coût annuel TURPE** : **{optimum['turpe_total'][0]:,.2f} €/an**
-      - Part fixe : {optimum['turpe_fixe'][0]:,.2f} €/an
-      - Part variable : {optimum['turpe_variable'][0]:,.2f} €/an
+    - **Coût annuel TURPE** : **{optimum['turpe_total_eur'][0]:,.2f} €/an**
+      - Part fixe : {optimum['turpe_fixe_eur'][0]:,.2f} €/an
+      - Part variable : {optimum['turpe_variable_eur'][0]:,.2f} €/an
 
     ---
 
@@ -622,11 +649,11 @@ def _(resultats):
 
     # Créer le graphique
     chart = alt.Chart(df_plot.to_pandas()).mark_line(point=True).encode(
-        x=alt.X('puissance_souscrite:Q', title='Puissance souscrite (kVA)'),
+        x=alt.X('puissance_souscrite_kva:Q', title='Puissance souscrite (kVA)'),
         y=alt.Y('turpe_total:Q', title='Coût annuel TURPE (€/an)', scale=alt.Scale(zero=False)),
         color=alt.Color('formule_tarifaire_acheminement:N', title='Formule tarifaire'),
         tooltip=[
-            alt.Tooltip('puissance_souscrite:Q', title='Puissance (kVA)'),
+            alt.Tooltip('puissance_souscrite_kva:Q', title='Puissance (kVA)'),
             alt.Tooltip('formule_tarifaire_acheminement:N', title='FTA'),
             alt.Tooltip('turpe_fixe:Q', title='Part fixe (€)', format='.2f'),
             alt.Tooltip('turpe_variable:Q', title='Part variable (€)', format='.2f'),
