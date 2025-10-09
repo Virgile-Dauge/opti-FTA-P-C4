@@ -374,7 +374,7 @@ def _(cdc):
         .agg([
             pl.col('Horodate').min().alias('date_debut'),
             pl.col('Horodate').max().alias('date_fin'),
-            pl.col('Valeur').max().alias('pmax'),
+            pl.col('Valeur').max().alias('pmax_moyenne_kva'),
         ])
     )
 
@@ -413,6 +413,8 @@ def _(cdc):
             pl.col('energie_hch_kwh').fill_null(0).floor(),
             pl.col('energie_hpb_kwh').fill_null(0).floor(),
             pl.col('energie_hcb_kwh').fill_null(0).floor(),
+            # Estimation pmax à partir de la puissance moyenne sur 5 min (heuristique × 1.15)
+            (pl.col('pmax_moyenne_kva') * 1.15).alias('pmax_estimee_kva'),
         ])
     )
 
@@ -456,7 +458,7 @@ def _(cdc, consos_agregees, plage_puissance):
     scenarios = (
         consos_agregees
         .select(['pdl', 'energie_hph_kwh', 'energie_hch_kwh',
-                 'energie_hpb_kwh', 'energie_hcb_kwh', 'pmax'])
+                 'energie_hpb_kwh', 'energie_hcb_kwh', 'pmax_estimee_kva'])
         .with_columns([
             # Dates projectives pour tous les scénarios (compatibilité TURPE rules)
             pl.lit(datetime(2025, 8, 1)).dt.replace_time_zone('Europe/Paris').alias('date_debut'),
@@ -472,6 +474,11 @@ def _(cdc, consos_agregees, plage_puissance):
             .alias('formule_tarifaire_acheminement')
         ])
         .explode('formule_tarifaire_acheminement')
+        # Filtrer les BTINF < 36 kVA : exclure si P_souscrite < pmax_estimee (risque de coupure)
+        .filter(
+            (pl.col('puissance_souscrite_kva') >= 36) |  # BTSUP : pas de filtrage
+            (pl.col('puissance_souscrite_kva') >= pl.col('pmax_estimee_kva'))  # BTINF : P >= pmax_estimee
+        )
         .with_columns([
             # Calculer durée dépassement pour chaque ligne
             pl.struct(['puissance_souscrite_kva'])
@@ -655,9 +662,9 @@ def _(resultats):
         tooltip=[
             alt.Tooltip('puissance_souscrite_kva:Q', title='Puissance (kVA)'),
             alt.Tooltip('formule_tarifaire_acheminement:N', title='FTA'),
-            alt.Tooltip('turpe_fixe:Q', title='Part fixe (€)', format='.2f'),
-            alt.Tooltip('turpe_variable:Q', title='Part variable (€)', format='.2f'),
-            alt.Tooltip('turpe_total:Q', title='Total (€)', format='.2f'),
+            alt.Tooltip('turpe_fixe_eur:Q', title='Part fixe (€)', format='.2f'),
+            alt.Tooltip('turpe_variable_eur:Q', title='Part variable (€)', format='.2f'),
+            alt.Tooltip('turpe_total_eur:Q', title='Total (€)', format='.2f'),
         ]
     ).properties(
         width=800,
