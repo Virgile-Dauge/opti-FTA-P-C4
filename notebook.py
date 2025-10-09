@@ -10,11 +10,11 @@ async with app.setup:
     import sys
     if "pyodide" in sys.modules:
         import micropip
-        # Upgrade altair pour compatibilité electricore (nécessite upgrade=True)
-        await micropip.install("altair>=5.5.0", upgrade=True)
+        # Installer les dépendances (keep_going=True pour ignorer conflits de versions)
         await micropip.install("pyarrow")
         await micropip.install("xlsxwriter")
-        await micropip.install("electricore==1.1.0")
+        # Installer electricore avec keep_going pour tolérer altair 5.4.1
+        await micropip.install("electricore==1.1.0", keep_going=True)
 
     # Imports standards
     import marimo as mo
