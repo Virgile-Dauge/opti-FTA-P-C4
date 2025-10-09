@@ -10,8 +10,8 @@ async with app.setup:
     import sys
     if "pyodide" in sys.modules:
         import micropip
-        # Upgrade altair pour compatibilité electricore
-        await micropip.install("altair>=5.5.0")
+        # Upgrade altair pour compatibilité electricore (nécessite upgrade=True)
+        await micropip.install("altair>=5.5.0", upgrade=True)
         await micropip.install("pyarrow")
         await micropip.install("xlsxwriter")
         await micropip.install("electricore==1.1.0")
