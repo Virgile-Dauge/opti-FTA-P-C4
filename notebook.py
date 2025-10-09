@@ -12,6 +12,7 @@ async with app.setup:
         import micropip
         await micropip.install("pyarrow")
         await micropip.install("xlsxwriter")
+        await micropip.install("electricore==1.1.0")
 
     # Imports standards
     import marimo as mo
@@ -20,18 +21,32 @@ async with app.setup:
     from datetime import datetime, time
     import io
 
+    # Import electricore pour calculs TURPE
+    from electricore.core.pipelines.turpe import (
+        ajouter_turpe_fixe,
+        ajouter_turpe_variable,
+        load_turpe_rules,
+    )
+
+    # Import pour optimisation multi-cadrans
+    from itertools import combinations_with_replacement
+
 
 @app.cell(hide_code=True)
 def _():
     mo.md(
         r"""
-    # 🔌 Optimisation TURPE - Calcul de Puissance Souscrite Optimale
+    # 🔌 Optimisation TURPE avec electricore - Calcul Multi-Scénarios
 
-    Cet outil permet de déterminer la **puissance souscrite optimale** pour un point de livraison
-    électrique en fonction d'une courbe de charge réelle.
+    Cet outil permet de déterminer la **puissance souscrite et formule tarifaire optimales**
+    pour un ou plusieurs points de livraison électriques en fonction des courbes de charge réelles.
 
-    Il simule les coûts d'acheminement (TURPE) pour différentes puissances et compare les options
-    **CU** (Courte Utilisation) et **LU** (Longue Utilisation).
+    Il simule les coûts d'acheminement (TURPE) pour :
+    - **Différentes puissances** (3 à 250 kVA)
+    - **Différentes formules tarifaires** (CU, MU, LU - selon la puissance)
+    - **Catégories C4 et C5** (avec pénalités de dépassement pour C4)
+
+    Les calculs utilisent **electricore v1.1.0** avec les tarifs TURPE officiels.
     """
     )
     return
@@ -48,123 +63,10 @@ def _():
     file_upload = mo.ui.file(
         filetypes=[".csv"],
         kind="area",
-        label="Sélectionnez votre fichier CSV R63"
+        label="Sélectionnez votre fichier CSV R63 (format Enedis)"
     )
     file_upload
     return (file_upload,)
-
-
-@app.cell(hide_code=True)
-def _():
-    mo.md("""## ⚙️ Paramètres TURPE""")
-    return
-
-
-@app.cell(hide_code=True)
-def _():
-    params_turpe = mo.ui.dictionary({
-        "CG": mo.ui.number(
-            start=0,
-            stop=1000,
-            step=0.01,
-            value=217.8,
-            label="CG - Composante de gestion annuelle (€)"
-        ),
-        "CC": mo.ui.number(
-            start=0,
-            stop=1000,
-            step=0.01,
-            value=283.27,
-            label="CC - Composante de comptage annuelle (€)"
-        ),
-        "CS_CU": mo.ui.number(
-            start=0,
-            stop=100,
-            step=0.01,
-            value=17.61,
-            label="CS_CU - Coefficient pondérateur de la puissance Courte Utilisation (€/kVA/an)"
-        ),
-        "CS_LU": mo.ui.number(
-            start=0,
-            stop=100,
-            step=0.01,
-            value=30.16,
-            label="CS_LU - Coefficient pondérateur de la puissance Longue Utilisation (€/kVA/an)"
-        ),
-        "CMDPS": mo.ui.number(
-            start=0,
-            stop=50,
-            step=0.01,
-            value=12.41,
-            label="CMDPS - Coût mensuel dépassement (€/h)"
-        ),
-        "CTA": mo.ui.number(
-            start=0,
-            stop=0.5,
-            step=0.0001,
-            value=0.2193,
-            label="CTA - Contribution Tarifaire d'Acheminement"
-        ),
-        # Tarifs TURPE variable par cadran (c€/kWh)
-        "HPH_CU": mo.ui.number(
-            start=0,
-            stop=50,
-            step=0.01,
-            value=6.91,
-            label="HPH CU - Heures Pleines Hiver (c€/kWh)"
-        ),
-        "HCH_CU": mo.ui.number(
-            start=0,
-            stop=50,
-            step=0.01,
-            value=4.21,
-            label="HCH CU - Heures Creuses Hiver (c€/kWh)"
-        ),
-        "HPB_CU": mo.ui.number(
-            start=0,
-            stop=50,
-            step=0.01,
-            value=2.13,
-            label="HPB CU - Heures Pleines Basse saison (c€/kWh)"
-        ),
-        "HCB_CU": mo.ui.number(
-            start=0,
-            stop=50,
-            step=0.01,
-            value=1.52,
-            label="HCB CU - Heures Creuses Basse saison (c€/kWh)"
-        ),
-        "HPH_LU": mo.ui.number(
-            start=0,
-            stop=50,
-            step=0.01,
-            value=5.69,
-            label="HPH LU - Heures Pleines Hiver (c€/kWh)"
-        ),
-        "HCH_LU": mo.ui.number(
-            start=0,
-            stop=50,
-            step=0.01,
-            value=3.47,
-            label="HCH LU - Heures Creuses Hiver (c€/kWh)"
-        ),
-        "HPB_LU": mo.ui.number(
-            start=0,
-            stop=50,
-            step=0.01,
-            value=2.01,
-            label="HPB LU - Heures Pleines Basse saison (c€/kWh)"
-        ),
-        "HCB_LU": mo.ui.number(
-            start=0,
-            stop=50,
-            step=0.01,
-            value=1.49,
-            label="HCB LU - Heures Creuses Basse saison (c€/kWh)"
-        ),
-    })
-    params_turpe
-    return (params_turpe,)
 
 
 @app.cell(hide_code=True)
@@ -217,15 +119,30 @@ def _(plage_hc_input):
     return (plages_hc,)
 
 
-@app.cell
-def _(plages_hc):
-    plages_hc
+@app.cell(hide_code=True)
+def _():
+    mo.md("""## 📊 Plage de puissances à tester""")
     return
+
+
+@app.cell(hide_code=True)
+def _():
+    plage_puissance = mo.ui.range_slider(
+        start=3,
+        stop=250,
+        step=1,
+        value=[3, 250],
+        label="Puissances à simuler (kVA)",
+        show_value=True
+    )
+
+    plage_puissance
+    return (plage_puissance,)
 
 
 @app.cell
 def _():
-    mo.md(r"""## Traitement de la courbe de charge""")
+    mo.md(r"""## 📥 Traitement de la courbe de charge""")
     return
 
 
@@ -289,60 +206,8 @@ def _(cdc_brut):
 
 
 @app.cell(hide_code=True)
-def _(cdc_brut, enrichir_dataframe, plages_hc):
-    # Enrichissement des données avec cadrans tarifaires
-    cdc = enrichir_dataframe(cdc_brut, plages_hc)
-
-    duree_jours = (cdc['Horodate'].max() - cdc['Horodate'].min()).days
-    warning = f"\n⚠️ Seulement {duree_jours} jours de données (recommandé : 365 jours)" if duree_jours < 365 else ""
-
-    # Extraire le pas de temps
-    pas_exemple = cdc['Pas'][0]
-    pas_uniques = cdc['Pas'].n_unique()
-    warning_pas = f"\n⚠️ Attention : {pas_uniques} pas de temps différents détectés" if pas_uniques > 1 else ""
-
-    # Statistiques par cadran
-    _stats_cadrans = cdc.group_by('cadran').agg([
-        pl.col('volume').sum().alias('volume_total')
-    ]).sort('cadran')
-
-    _cadrans_str = "\n".join([
-        f"     - {row['cadran']} : {row['volume_total']:.0f} kWh"
-        for row in _stats_cadrans.iter_rows(named=True)
-    ])
-
-    mo.md(f"""
-        ✅ **Données enrichies avec succès**
-
-        - Pas de temps : {pas_exemple}{warning_pas}
-
-        **Consommation par cadran tarifaire :**
-        {_cadrans_str}
-        {warning}
-    """)
-    return (cdc,)
-
-
-@app.cell
-def _(cdc):
-    cdc
-    return
-
-
-@app.cell(hide_code=True)
 def fonctions_enrichissement():
-    def expr_depassement(P: float) -> pl.Expr:
-        """
-        Expression Polars qui identifie les dépassements de puissance.
-
-        Args:
-            P: Puissance souscrite (kW)
-
-        Returns:
-            Expression Polars booléenne : True si dépassement, False sinon
-        """
-        return pl.col('Valeur') > P
-
+    """Fonctions utilitaires pour enrichir la courbe de charge avec cadrans horaires."""
 
     def expr_pas_heures() -> pl.Expr:
         """
@@ -454,270 +319,589 @@ def fonctions_enrichissement():
                 expr_cadran(plages_hc).alias('cadran')
             ])
         )
-    return enrichir_dataframe, expr_depassement
+    return (enrichir_dataframe,)
 
 
 @app.cell(hide_code=True)
-def _(expr_depassement, params_turpe):
-    # Fonctions de calcul
-    def fixe_CU(P):
-        """Calcule le coût fixe annuel en option Courte Utilisation (CU)."""
-        return (
-            params_turpe.value["CG"]
-            + params_turpe.value["CC"]
-            + params_turpe.value["CS_CU"] * P
-            ) * (1 + params_turpe.value["CTA"])
+def _(cdc_brut, enrichir_dataframe, plages_hc):
+    # Enrichissement des données avec cadrans tarifaires
+    cdc = enrichir_dataframe(cdc_brut, plages_hc)
 
-    def fixe_LU(P):
-        """Calcule le coût fixe annuel en option Longue Utilisation (LU)."""
-        return (
-            params_turpe.value["CG"]
-            + params_turpe.value["CC"]
-            + params_turpe.value["CS_LU"] * P
-            ) * (1 + params_turpe.value["CTA"])
+    duree_jours = (cdc['Horodate'].max() - cdc['Horodate'].min()).days
+    warning = f"\n⚠️ Seulement {duree_jours} jours de données (recommandé : 365 jours)" if duree_jours < 365 else ""
 
-    def calculer_duree_depassement(df: pl.DataFrame, P: float) -> float:
-        """
-        Calcule la durée totale de dépassement en heures.
+    # Extraire le pas de temps
+    pas_exemple = cdc['Pas'][0]
+    pas_uniques = cdc['Pas'].n_unique()
+    warning_pas = f"\n⚠️ Attention : {pas_uniques} pas de temps différents détectés" if pas_uniques > 1 else ""
 
-        Méthode conforme Enedis :
-        - Utilise la colonne 'pas_heures' déjà calculée dans le DataFrame
-        - Chaque mesure en dépassement compte pour ce pas de temps
-        - Durée totale (h) = Σ (dépassement × pas_heures)
+    # Statistiques par cadran
+    _stats_cadrans = cdc.group_by('cadran').agg([
+        pl.col('volume').sum().alias('volume_total')
+    ]).sort('cadran')
 
-        Args:
-            df: DataFrame Polars avec colonnes 'Valeur', 'pas_heures'
-            P: Puissance souscrite (kW)
+    _cadrans_str = "\n".join([
+        f"     - {row['cadran']} : {row['volume_total']:.0f} kWh"
+        for row in _stats_cadrans.iter_rows(named=True)
+    ])
 
-        Returns:
-            Durée totale de dépassement (heures)
-        """
-        return (
-            df
-            .with_columns([
-                expr_depassement(P).alias('en_depassement')
-            ])
-            .select([
-                (pl.col('en_depassement').cast(pl.Int32) * pl.col('pas_heures')).alias('duree_depassement')
-            ])
-            .sum()
-            .item()
-        )
+    mo.md(f"""
+        ✅ **Données enrichies avec succès**
 
-    def calculer_turpe_variable(df: pl.DataFrame, params: dict, option: str) -> float:
-        """
-        Calcule le coût TURPE variable total pour une option tarifaire.
+        - Pas de temps : {pas_exemple}{warning_pas}
 
-        Args:
-            df: DataFrame enrichi avec colonnes 'cadran' et 'volume'
-            params: Dictionnaire des paramètres TURPE
-            option: 'CU' ou 'LU'
+        **Consommation par cadran tarifaire :**
+        {_cadrans_str}
+        {warning}
+    """)
+    return (cdc,)
 
-        Returns:
-            Coût TURPE variable total annuel (€)
-        """
-        # Agréger les volumes par cadran
-        volumes_cadrans = df.group_by('cadran').agg([
-            pl.col('volume').sum().alias('volume_total')
-        ])
 
-        cout_total = 0.0
-        for row in volumes_cadrans.iter_rows(named=True):
-            cadran = row['cadran']
-            volume = row['volume_total']
-            # Tarif en c€/kWh, on convertit en €/kWh
-            tarif_key = f"{cadran}_{option}"
-            tarif = params.get(tarif_key, 0) / 100.0  # c€ → €
-            cout_total += volume * tarif
-
-        return cout_total
-    return (
-        calculer_duree_depassement,
-        calculer_turpe_variable,
-        fixe_CU,
-        fixe_LU,
-    )
+@app.cell
+def _(cdc):
+    cdc
+    return
 
 
 @app.cell
 def _():
-    mo.md(r"""## Simulation en fonction de la puissance""")
+    mo.md(r"""## 🔄 Agrégation par PDL et pivotage des cadrans""")
     return
 
 
 @app.cell(hide_code=True)
-def simulation(
-    calculer_duree_depassement,
-    calculer_turpe_variable,
-    cdc,
-    fixe_CU,
-    fixe_LU,
-    params_turpe,
-    plage_puissance,
-):
-    # Simulation TURPE
-    mo.stop(cdc is None, output=mo.md("⏸️ En attente des données"))
+def _(cdc):
+    # Étape 1: Calculer les dates globales par PDL (AVANT le pivot)
+    dates_pdl = (
+        cdc
+        .group_by('Identifiant PRM')
+        .agg([
+            pl.col('Horodate').min().alias('date_debut'),
+            pl.col('Horodate').max().alias('date_fin'),
+            pl.col('Valeur').max().alias('pmax_moyenne_kva'),
+        ])
+    )
 
-    # Génération de la plage de puissances
-    P_min, P_max = plage_puissance.value
-    Ps = list(range(P_min, P_max + 1))
+    # Étape 2: Agrégation des énergies et pmax par PDL et cadran
+    energies_par_cadran = (
+        cdc
+        .group_by(['Identifiant PRM', 'cadran'])
+        .agg([
+            pl.col('volume').sum().alias('energie_kwh'),
+            pl.col('Valeur').max().alias('pmax_cadran_kva'),
+        ])
+    )
 
-    # Calcul du TURPE variable (identique pour toutes les puissances)
-    params = params_turpe.value
-    cout_variable_cu = calculer_turpe_variable(cdc, params, 'CU')
-    cout_variable_lu = calculer_turpe_variable(cdc, params, 'LU')
+    # Étape 3a: Pivot des énergies
+    energies_pivot = energies_par_cadran.pivot(
+        on='cadran',
+        index='Identifiant PRM',
+        values='energie_kwh',
+    )
 
-    # Calcul pour chaque puissance
-    resultats = []
-    for P in Ps:
-        cout_fixe_cu = fixe_CU(P)
-        cout_fixe_lu = fixe_LU(P)
-        duree_depassement_h = calculer_duree_depassement(cdc, P)
-        cout_depassement = duree_depassement_h * params["CMDPS"]
+    # Étape 3b: Pivot des pmax par cadran
+    pmax_pivot = energies_par_cadran.pivot(
+        on='cadran',
+        index='Identifiant PRM',
+        values='pmax_cadran_kva',
+    )
 
-        resultats.append({
-            'PS': P,
-            'CU fixe': cout_fixe_cu,
-            'LU fixe': cout_fixe_lu,
-            'CU variable': cout_variable_cu,
-            'LU variable': cout_variable_lu,
-            'Dépassement': cout_depassement,
-            'Total CU': cout_fixe_cu + cout_variable_cu + cout_depassement,
-            'Total LU': cout_fixe_lu + cout_variable_lu + cout_depassement
+    # Étape 3c: Joindre tout
+    consos_agregees = (
+        energies_pivot
+        .join(dates_pdl, on='Identifiant PRM', how='left')
+        .join(
+            pmax_pivot.rename({
+                'HPH': 'pmax_hph_kva',
+                'HCH': 'pmax_hch_kva',
+                'HPB': 'pmax_hpb_kva',
+                'HCB': 'pmax_hcb_kva',
+            }),
+            on='Identifiant PRM',
+            how='left'
+        )
+        # Renommer pour format electricore
+        .rename({
+            'Identifiant PRM': 'pdl',
+            'HPH': 'energie_hph_kwh',
+            'HCH': 'energie_hch_kwh',
+            'HPB': 'energie_hpb_kwh',
+            'HCB': 'energie_hcb_kwh',
         })
+        # Remplir les valeurs manquantes par 0 (si un cadran n'existe pas)
+        .with_columns([
+            # Calculer le nombre de jours de la période
+            (pl.col('date_fin') - pl.col('date_debut')).dt.total_days().alias('nb_jours'),
+            pl.col('energie_hph_kwh').fill_null(0).floor(),
+            pl.col('energie_hch_kwh').fill_null(0).floor(),
+            pl.col('energie_hpb_kwh').fill_null(0).floor(),
+            pl.col('energie_hcb_kwh').fill_null(0).floor(),
+            # Estimation pmax globale à partir de la puissance moyenne sur 5 min (heuristique × 1.15)
+            (pl.col('pmax_moyenne_kva') * 1.15).alias('pmax_estimee_kva'),
+            # Estimation pmax par cadran avec même heuristique
+            (pl.col('pmax_hph_kva') * 1.15).fill_null(0).alias('pmax_hph_estimee_kva'),
+            (pl.col('pmax_hch_kva') * 1.15).fill_null(0).alias('pmax_hch_estimee_kva'),
+            (pl.col('pmax_hpb_kva') * 1.15).fill_null(0).alias('pmax_hpb_estimee_kva'),
+            (pl.col('pmax_hcb_kva') * 1.15).fill_null(0).alias('pmax_hcb_estimee_kva'),
+        ])
+    )
 
-    Simulation = pl.DataFrame(resultats)
-
-    # Identifier les optimums
-    idx_opt_CU = Simulation['Total CU'].arg_min()
-    P_opt_CU = Simulation['PS'][idx_opt_CU]
-    cout_opt_CU = Simulation['Total CU'][idx_opt_CU]
-
-    idx_opt_LU = Simulation['Total LU'].arg_min()
-    P_opt_LU = Simulation['PS'][idx_opt_LU]
-    cout_opt_LU = Simulation['Total LU'][idx_opt_LU]
-
-    mo.md("✅ Simulation terminée")
-    return P_opt_CU, P_opt_LU, Simulation, cout_opt_CU, cout_opt_LU
-
-
-@app.cell(hide_code=True)
-def _(P_opt_CU, P_opt_LU, Simulation, cout_opt_CU, cout_opt_LU):
-    # Affichage des résultats
-    mo.stop(Simulation is None, output=mo.md("⏸️ En attente de la simulation"))
-
-    economie = abs(cout_opt_CU - cout_opt_LU)
-    recommandation = "CU" if cout_opt_CU < cout_opt_LU else "LU"
-    P_recommande = P_opt_CU if cout_opt_CU < cout_opt_LU else P_opt_LU
-    cout_recommande = min(cout_opt_CU, cout_opt_LU)
+    _nb_pdl = len(consos_agregees)
+    _energie_totale = (
+        consos_agregees['energie_hph_kwh'].sum() +
+        consos_agregees['energie_hch_kwh'].sum() +
+        consos_agregees['energie_hpb_kwh'].sum() +
+        consos_agregees['energie_hcb_kwh'].sum()
+    )
 
     mo.md(f"""
-    ## 🎯 Résultats de l'optimisation
+    ✅ **Agrégation terminée**
 
-    ### 📌 Option COURTE UTILISATION (CU)
-    - **Puissance optimale** : {P_opt_CU} kW
-    - **Coût annuel** : {cout_opt_CU:.2f} €/an
+    - Nombre de PDL : {_nb_pdl}
+    - Énergie totale : {_energie_totale:,.0f} kWh
+    """)
+    return (consos_agregees,)
 
-    ### 📌 Option LONGUE UTILISATION (LU)
-    - **Puissance optimale** : {P_opt_LU} kW
-    - **Coût annuel** : {cout_opt_LU:.2f} €/an
+
+@app.cell
+def _(consos_agregees):
+    consos_agregees
+    return
+
+
+@app.cell
+def _():
+    mo.md(r"""## 🎯 Génération des scénarios d'optimisation""")
+    return
+
+
+@app.function(hide_code=True)
+def generer_scenarios_reduction_proportionnelle(consos_agregees: pl.DataFrame) -> pl.DataFrame:
+    """
+    Génère les scénarios multi-cadrans par réduction proportionnelle simultanée.
+
+    Principe :
+    - Part de (pmax_hph, pmax_hch, pmax_hpb, pmax_hcb) × 1.15 arrondi
+    - Applique la contrainte P_hph ≤ P_hch ≤ P_hpb ≤ P_hcb
+    - Réduit toutes les puissances de 1 kVA simultanément jusqu'à ce que le min atteigne 36
+
+    Hypothèse : Le profil de charge est similaire entre cadrans (seule l'amplitude diffère)
+    """
+    from math import ceil
+
+    scenarios_list = []
+
+    for row in consos_agregees.iter_rows(named=True):
+        # Étape 1 : Calculer les puissances de base (pmax × 1.15)
+        p_hph_base = int(ceil(row['pmax_hph_estimee_kva']))
+        p_hch_base = int(ceil(row['pmax_hch_estimee_kva']))
+        p_hpb_base = int(ceil(row['pmax_hpb_estimee_kva']))
+        p_hcb_base = int(ceil(row['pmax_hcb_estimee_kva']))
+
+        # Étape 2 : Forcer la contrainte d'ordre (cascade)
+        p_hph_initial = max(36, p_hph_base)
+        p_hch_initial = max(p_hph_initial, p_hch_base)
+        p_hpb_initial = max(p_hch_initial, p_hpb_base)
+        p_hcb_initial = max(p_hpb_initial, p_hcb_base)
+
+        # Étape 3 : Le minimum détermine le nombre d'itérations
+        p_min_initial = min(p_hph_initial, p_hch_initial, p_hpb_initial, p_hcb_initial)
+        nb_iterations = p_min_initial - 36 + 1  # Jusqu'à ce que le min atteigne 36
+
+        # Étape 4 : Générer toutes les configurations par réduction simultanée
+        for i in range(nb_iterations):
+            reduction = i
+            config = {
+                'pdl': row['pdl'],
+                'energie_hph_kwh': row['energie_hph_kwh'],
+                'energie_hch_kwh': row['energie_hch_kwh'],
+                'energie_hpb_kwh': row['energie_hpb_kwh'],
+                'energie_hcb_kwh': row['energie_hcb_kwh'],
+                'puissance_hph_kva': max(36, p_hph_initial - reduction),
+                'puissance_hch_kva': max(36, p_hch_initial - reduction),
+                'puissance_hpb_kva': max(36, p_hpb_initial - reduction),
+                'puissance_hcb_kva': max(36, p_hcb_initial - reduction),
+                'iteration': i,
+            }
+            scenarios_list.append(config)
+
+    # Créer DataFrame
+    df_scenarios = pl.DataFrame(scenarios_list)
+
+    # Ajouter dates, FTA, etc.
+    df_scenarios = (
+        df_scenarios
+        .with_columns([
+            pl.lit(datetime(2025, 8, 1)).dt.replace_time_zone('Europe/Paris').alias('date_debut'),
+            pl.lit(datetime(2026, 7, 31)).dt.replace_time_zone('Europe/Paris').alias('date_fin'),
+            pl.lit(365).alias('nb_jours'),
+            pl.lit(['BTSUPCU', 'BTSUPLU']).alias('formule_tarifaire_acheminement'),
+        ])
+        .explode('formule_tarifaire_acheminement')
+        .with_columns([
+            pl.col('puissance_hcb_kva').alias('puissance_souscrite_kva'),  # Max pour compatibilité
+        ])
+    )
+
+    return df_scenarios
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell(hide_code=True)
+def _(cdc, consos_agregees, plage_puissance):
+    # Génération des scénarios multi-cadrans par réduction proportionnelle
+
+    P_min, P_max = plage_puissance.value
+
+    # Mode multi-cadrans: réduction proportionnelle simultanée
+
+    # Étape 1: Scénarios BTINF mono-puissance (< 36 kVA) si nécessaire
+    scenarios_btinf = None
+    if P_min < 36:
+        puissances_btinf = list(range(P_min, min(36, P_max + 1)))
+        scenarios_btinf = (
+            consos_agregees
+            .select(['pdl', 'energie_hph_kwh', 'energie_hch_kwh',
+                     'energie_hpb_kwh', 'energie_hcb_kwh', 'pmax_estimee_kva'])
+            .with_columns([
+                pl.lit(datetime(2025, 8, 1)).dt.replace_time_zone('Europe/Paris').alias('date_debut'),
+                pl.lit(datetime(2026, 7, 31)).dt.replace_time_zone('Europe/Paris').alias('date_fin'),
+                pl.lit(365).alias('nb_jours'),
+                pl.lit(puissances_btinf).alias('puissance_souscrite_kva')
+            ])
+            .explode('puissance_souscrite_kva')
+            .with_columns([
+                pl.lit(['BTINFCU4', 'BTINFMU4', 'BTINFLU']).alias('formule_tarifaire_acheminement')
+            ])
+            .explode('formule_tarifaire_acheminement')
+            .filter(pl.col('puissance_souscrite_kva') >= pl.col('pmax_estimee_kva'))
+            .with_columns([
+                # Remplir les 4 colonnes avec la puissance mono pour BTINF
+                pl.col('puissance_souscrite_kva').alias('puissance_hph_kva'),
+                pl.col('puissance_souscrite_kva').alias('puissance_hch_kva'),
+                pl.col('puissance_souscrite_kva').alias('puissance_hpb_kva'),
+                pl.col('puissance_souscrite_kva').alias('puissance_hcb_kva'),
+            ])
+            .with_columns([
+                # Calculer durée dépassement avec les 4 puissances par cadran
+                pl.struct(['puissance_hph_kva', 'puissance_hch_kva', 'puissance_hpb_kva', 'puissance_hcb_kva'])
+                .map_elements(
+                    lambda row: calculer_duree_depassement_par_cadran(
+                        cdc,
+                        row['puissance_hph_kva'],
+                        row['puissance_hch_kva'],
+                        row['puissance_hpb_kva'],
+                        row['puissance_hcb_kva']
+                    ),
+                    return_dtype=pl.Float64
+                )
+                .alias('duree_depassement_h')
+            ])
+        )
+
+    # Étape 2: Scénarios BTSUP multi-cadrans (≥ 36 kVA) - Réduction proportionnelle
+    scenarios_btsup = generer_scenarios_reduction_proportionnelle(consos_agregees)
+
+    # Calculer dépassements pour BTSUP
+    scenarios_btsup = scenarios_btsup.with_columns([
+        pl.struct(['puissance_hph_kva', 'puissance_hch_kva', 'puissance_hpb_kva', 'puissance_hcb_kva'])
+        .map_elements(
+            lambda row: calculer_duree_depassement_par_cadran(
+                cdc,
+                row['puissance_hph_kva'],
+                row['puissance_hch_kva'],
+                row['puissance_hpb_kva'],
+                row['puissance_hcb_kva']
+            ),
+            return_dtype=pl.Float64
+        )
+        .alias('duree_depassement_h')
+    ])
+
+    # Harmoniser l'ordre des colonnes avant concat
+    colonnes_ordre = [
+        'pdl', 'energie_hph_kwh', 'energie_hch_kwh', 'energie_hpb_kwh', 'energie_hcb_kwh',
+        'date_debut', 'date_fin', 'nb_jours',
+        'puissance_souscrite_kva', 'formule_tarifaire_acheminement', 'duree_depassement_h',
+        'puissance_hph_kva', 'puissance_hch_kva', 'puissance_hpb_kva', 'puissance_hcb_kva'
+    ]
+
+    # Ajouter pmax_estimee_kva si nécessaire pour BTINF
+    if 'pmax_estimee_kva' in scenarios_btsup.columns:
+        scenarios_btsup = scenarios_btsup.select(colonnes_ordre + ['pmax_estimee_kva'])
+    else:
+        scenarios_btsup = scenarios_btsup.select(colonnes_ordre)
+
+    # Concaténer BTINF et BTSUP
+    if scenarios_btinf is not None:
+        colonnes_communes = [col for col in colonnes_ordre if col in scenarios_btinf.columns]
+        scenarios_btinf = scenarios_btinf.select(colonnes_communes)
+        scenarios_btsup = scenarios_btsup.select(colonnes_communes)
+        scenarios = pl.concat([scenarios_btinf, scenarios_btsup])
+    else:
+        scenarios = scenarios_btsup
+
+    _nb_scenarios_btsup = len(scenarios_btsup)
+    _info = f"Multi-cadrans réduction proportionnelle: {_nb_scenarios_btsup} scénarios BTSUP"
+
+    _nb_scenarios = len(scenarios)
+    _nb_pdl = scenarios['pdl'].n_unique()
+
+    mo.md(f"""
+    ✅ **Scénarios générés**
+
+    - {_info}
+    - Nombre de scénarios : {_nb_scenarios:,}
+    - PDL : {_nb_pdl}
+    - FTA testées : BTINFCU4, BTINFMU4, BTINFLU (< 36 kVA) + BTSUPCU, BTSUPLU (≥ 36 kVA)
+    """)
+    return (scenarios,)
+
+
+@app.function(hide_code=True)
+# Fonction pour calculer la durée de dépassement par cadran
+def calculer_duree_depassement_par_cadran(
+    cdc: pl.DataFrame,
+    puissance_hph_kva: float,
+    puissance_hch_kva: float,
+    puissance_hpb_kva: float,
+    puissance_hcb_kva: float
+) -> float:
+    """
+    Calcule la durée totale de dépassement en tenant compte des puissances par cadran.
+
+    Args:
+        cdc: DataFrame avec colonnes 'Valeur' (kW), 'pas_heures', 'cadran'
+        puissance_hph_kva, puissance_hch_kva, puissance_hpb_kva, puissance_hcb_kva:
+            Puissances souscrites par cadran (kVA)
+
+    Returns:
+        Durée totale de dépassement en heures (somme sur tous les cadrans)
+    """
+    return (
+        cdc
+        .with_columns([
+            # Mapper chaque cadran à sa puissance souscrite
+            pl.when(pl.col('cadran') == 'HPH').then(pl.lit(puissance_hph_kva))
+            .when(pl.col('cadran') == 'HCH').then(pl.lit(puissance_hch_kva))
+            .when(pl.col('cadran') == 'HPB').then(pl.lit(puissance_hpb_kva))
+            .when(pl.col('cadran') == 'HCB').then(pl.lit(puissance_hcb_kva))
+            .otherwise(pl.lit(puissance_hcb_kva))  # Défaut: utiliser la puissance max (HCB)
+            .alias('puissance_seuil')
+        ])
+        # Ne compter que les dépassements (Valeur > seuil du cadran)
+        .filter(pl.col('Valeur') > pl.col('puissance_seuil'))
+        .select(pl.col('pas_heures').sum())
+        .item()
+    )
+
+
+@app.cell
+def _(scenarios):
+    scenarios
+    return
+
+
+@app.cell
+def _():
+    mo.md(r"""## 🧮 Calcul TURPE avec electricore""")
+    return
+
+
+@app.cell(hide_code=True)
+def _(scenarios):
+    # Charger les règles TURPE une seule fois
+    regles_turpe = load_turpe_rules()
+
+    # Calcul TURPE via electricore
+    # Préparer les données au format attendu par electricore
+
+    resultats = (
+        scenarios
+        .rename({
+            'date_debut': 'debut',
+            'date_fin': 'fin'
+        })
+        .with_columns([
+            # Ajouter timezone Europe/Paris pour compatibilité avec electricore
+            pl.col('debut').dt.replace_time_zone('Europe/Paris').alias('debut'),
+            pl.col('fin').dt.replace_time_zone('Europe/Paris').alias('fin'),
+        ])
+        .with_columns([
+            # Ajouter les colonnes agrégées pour formules C5 (HP/HC/Base)
+            (pl.col('energie_hph_kwh') + pl.col('energie_hpb_kwh')).alias('energie_hp_kwh'),
+            (pl.col('energie_hch_kwh') + pl.col('energie_hcb_kwh')).alias('energie_hc_kwh'),
+            (pl.col('energie_hph_kwh') + pl.col('energie_hch_kwh') +
+             pl.col('energie_hpb_kwh') + pl.col('energie_hcb_kwh')).alias('energie_base_kwh'),
+            # Pour C4 : les colonnes puissance_*_kva existent toujours maintenant
+            # On les renomme juste en puissance_souscrite_*_kva pour electricore
+            pl.col('puissance_hph_kva').alias('puissance_souscrite_hph_kva'),
+            pl.col('puissance_hch_kva').alias('puissance_souscrite_hch_kva'),
+            pl.col('puissance_hpb_kva').alias('puissance_souscrite_hpb_kva'),
+            pl.col('puissance_hcb_kva').alias('puissance_souscrite_hcb_kva'),
+        ])
+        .lazy()
+        .pipe(ajouter_turpe_fixe, regles=regles_turpe)
+        .pipe(ajouter_turpe_variable, regles=regles_turpe)
+        .with_columns([
+            # Renommer pour cohérence (electricore utilise suffixe _eur)
+            # pl.col('turpe_fixe_eur').alias('turpe_fixe'),
+            # pl.col('turpe_variable_eur').alias('turpe_variable'),
+            (pl.col('turpe_fixe_eur') + pl.col('turpe_variable_eur')).alias('turpe_total_eur')
+        ])
+        .collect()
+    )
+
+    _nb_resultats = len(resultats)
+    _cout_min = resultats['turpe_total_eur'].min()
+    _cout_max = resultats['turpe_total_eur'].max()
+
+    mo.md(f"""
+    ✅ **Calculs TURPE terminés**
+
+    - Scénarios calculés : {_nb_resultats:,}
+    - Coût min : {_cout_min:.2f} €/an
+    - Coût max : {_cout_max:.2f} €/an
+    """)
+    return (resultats,)
+
+
+@app.cell
+def _(resultats):
+    resultats
+    return
+
+
+@app.cell
+def _():
+    mo.md(r"""## 🎯 Résultats et recommandations""")
+    return
+
+
+@app.cell(hide_code=True)
+def _(resultats):
+    # Trouver l'optimum global (toutes FTA confondues)
+    idx_opt = resultats['turpe_total_eur'].arg_min()
+    optimum = resultats[idx_opt]
+
+    # Optimums par FTA
+    optimums_par_fta = (
+        resultats
+        .group_by(['pdl', 'formule_tarifaire_acheminement'])
+        .agg([
+            pl.col('turpe_total_eur').min().alias('cout_min_eur'),
+            pl.col('puissance_souscrite_kva').filter(
+                pl.col('turpe_total_eur') == pl.col('turpe_total_eur').min()
+            ).first().alias('puissance_opt'),
+        ])
+        .sort('cout_min_eur')
+    )
+
+    # Affichage des puissances par cadran pour l'optimum
+    fta_opt = optimum['formule_tarifaire_acheminement'][0]
+
+    # Déterminer si c'est multi-puissances (BTSUP) ou mono-puissance (BTINF)
+    is_multi = fta_opt.startswith('BTSUP')
+
+    if is_multi:
+        puissances_detail = f"""
+    - **Puissances souscrites par cadran** :
+      - HPH : **{optimum['puissance_hph_kva'][0]:.0f} kVA**
+      - HCH : **{optimum['puissance_hch_kva'][0]:.0f} kVA**
+      - HPB : **{optimum['puissance_hpb_kva'][0]:.0f} kVA**
+      - HCB : **{optimum['puissance_hcb_kva'][0]:.0f} kVA**
+    """
+    else:
+        puissances_detail = f"""
+    - **Puissance souscrite** : **{optimum['puissance_souscrite_kva'][0]:.0f} kVA** (mono-puissance)
+    """
+
+    mo.md(f"""
+    ## 🏆 Recommandation optimale
+
+    **Meilleure configuration** :
+    - **PDL** : `{optimum['pdl'][0]}`
+    {puissances_detail}
+    - **Formule tarifaire** : **{optimum['formule_tarifaire_acheminement'][0]}**
+    - **Coût annuel TURPE** : **{optimum['turpe_total_eur'][0]:,.2f} €/an**
+      - Part fixe : {optimum['turpe_fixe_eur'][0]:,.2f} €/an
+      - Part variable : {optimum['turpe_variable_eur'][0]:,.2f} €/an
 
     ---
+
+    ### 📊 Comparaison par formule tarifaire
+
+    {optimums_par_fta.to_pandas().to_markdown(index=False)}
     """)
-    return P_recommande, cout_recommande, economie, recommandation
-
-
-@app.cell(hide_code=True)
-def _(P_recommande, cout_recommande, economie, recommandation):
-    mo.md(
-        f"""
-    ## 🎯 Résultats de l'optimisation
-    ### ✅ RECOMMANDATION
-
-    **Souscrire {P_recommande} kW en option {recommandation}**
-
-    - Coût annuel : **{cout_recommande:.2f} €/an**
-    - Économie vs autre option : **{economie:.2f} €/an**
-    """
-    )
     return
 
 
 @app.cell(hide_code=True)
-def _():
-    mo.md("""## 📊 Plage de puissances à tester""")
-    return
-
-
-@app.cell(hide_code=True)
-def _():
-    plage_puissance = mo.ui.range_slider(
-        start=10,
-        stop=100,
-        step=1,
-        value=[36, 66],
-        label="Puissances à simuler (kW)",
-        show_value=True
-    )
-    plage_puissance
-    return (plage_puissance,)
-
-
-@app.cell(hide_code=True)
-def _(Simulation):
+def _(resultats):
     # Graphique interactif
-    if Simulation is not None:
-        import altair as alt
+    import altair as alt
 
-        # Préparer les données pour Altair
-        df_plot = Simulation.select(['PS', 'Total CU', 'Total LU'])
+    # Filtrer sur le premier PDL pour la visualisation
+    pdl_unique = resultats['pdl'][0]
+    df_plot = resultats.filter(pl.col('pdl') == pdl_unique)
 
-        # Unpivot pour avoir une colonne "Option"
-        df_melted = df_plot.unpivot(
-            index='PS',
-            on=['Total CU', 'Total LU'],
-            variable_name='Option',
-            value_name='Coût'
-        )
+    # Créer le graphique avec les puissances par cadran
+    chart = alt.Chart(df_plot.to_pandas()).mark_line(point=True).encode(
+        x=alt.X('puissance_souscrite_kva:Q', title='Puissance souscrite max (kVA)'),
+        y=alt.Y('turpe_total_eur:Q', title='Coût annuel TURPE (€/an)', scale=alt.Scale(zero=False)),
+        color=alt.Color('formule_tarifaire_acheminement:N', title='Formule tarifaire'),
+        tooltip=[
+            alt.Tooltip('puissance_hph_kva:Q', title='P HPH (kVA)'),
+            alt.Tooltip('puissance_hch_kva:Q', title='P HCH (kVA)'),
+            alt.Tooltip('puissance_hpb_kva:Q', title='P HPB (kVA)'),
+            alt.Tooltip('puissance_hcb_kva:Q', title='P HCB (kVA)'),
+            alt.Tooltip('formule_tarifaire_acheminement:N', title='FTA'),
+            alt.Tooltip('turpe_fixe_eur:Q', title='Part fixe (€)', format='.2f'),
+            alt.Tooltip('turpe_variable_eur:Q', title='Part variable (€)', format='.2f'),
+            alt.Tooltip('turpe_total_eur:Q', title='Total (€)', format='.2f'),
+        ]
+    ).properties(
+        width=800,
+        height=500,
+        title=f"Coût TURPE vs Puissance souscrite max (HCB) - PDL {pdl_unique}"
+    ).interactive()
 
-        # Créer le graphique
-        chart = alt.Chart(df_melted.to_pandas()).mark_line(point=True).encode(
-            x=alt.X('PS:Q', title='Puissance souscrite (kW)'),
-            y=alt.Y('Coût:Q', title='Coût annuel projeté (€/an)', scale=alt.Scale(zero=False)),
-            color=alt.Color('Option:N', title='Option tarifaire'),
-            tooltip=['PS', 'Option', alt.Tooltip('Coût:Q', format='.2f')]
-        ).properties(
-            width=700,
-            height=400,
-            title="Coût d'acheminement et CTA annuel projeté en fonction de la puissance souscrite"
-        ).interactive()
+    _note_explicative = mo.md("""
+    **Note sur le graphique** :
+    - **BTINF** (< 36 kVA) : mono-puissance, l'axe X représente la puissance unique souscrite
+    - **BTSUP** (≥ 36 kVA) : multi-cadrans, l'axe X représente la puissance max (HCB)
+    - Pour BTSUP, les 4 puissances par cadran (HPH ≤ HCH ≤ HPB ≤ HCB) sont visibles dans le tooltip
+    - Passez la souris sur les points pour voir le détail complet de chaque configuration
+    """)
 
-        _graphique = mo.ui.altair_chart(chart)
-    else:
-        _graphique = mo.md("")
-
-    _graphique
+    mo.vstack([mo.ui.altair_chart(chart), _note_explicative])
     return
 
 
 @app.cell(hide_code=True)
-def _(Simulation):
-    # Export Excel
-    if Simulation is not None:
-        # Créer le fichier Excel en mémoire
-        excel_buffer = io.BytesIO()
-        Simulation.write_excel(excel_buffer)
-        excel_data = excel_buffer.getvalue()
+def _(resultats):
+    # Export Excel - Retirer les timezones pour compatibilité xlsxwriter
+    excel_buffer = io.BytesIO()
 
-        _download_button = mo.download(
-            data=excel_data,
-            filename="Simulation_TURPE.xlsx",
-            label="📥 Télécharger les résultats (Excel)",
-            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-    else:
-        _download_button = mo.md("")
+    # Créer une copie sans timezone pour l'export
+    resultats_excel = resultats.with_columns([
+        pl.col('debut').dt.convert_time_zone('UTC').dt.replace_time_zone(None).alias('debut'),
+        pl.col('fin').dt.convert_time_zone('UTC').dt.replace_time_zone(None).alias('fin'),
+    ])
 
+    resultats_excel.write_excel(excel_buffer)
+    excel_data = excel_buffer.getvalue()
+
+    _download_button = mo.download(
+        data=excel_data,
+        filename="Optimisation_TURPE_electricore.xlsx",
+        label="📥 Télécharger les résultats détaillés (Excel)",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
     _download_button
     return
 
