@@ -1052,7 +1052,12 @@ def _(cout_actuel, resultats):
 
     # Filtrer sur le premier PDL pour la visualisation
     pdl_unique = resultats['pdl'][0]
-    df_plot = resultats.filter(pl.col('pdl') == pdl_unique)
+    df_plot = (
+        resultats
+        .filter(pl.col('pdl') == pdl_unique)
+        # Trier par FTA puis par puissance pour que les lignes se tracent correctement
+        .sort(['formule_tarifaire_acheminement', 'puissance_souscrite_kva'])
+    )
 
     # Trouver l'optimum
     idx_opt_graph = df_plot['turpe_total_eur'].arg_min()
@@ -1062,29 +1067,47 @@ def _(cout_actuel, resultats):
     colonnes_sans_dates = [col for col in df_plot.columns if col not in ['debut', 'fin', 'date_debut', 'date_fin', 'est_scenario_actuel']]
     df_plot_clean = df_plot.select(colonnes_sans_dates)
 
-    # Préparer les marqueurs
+    # S'assurer que les colonnes numériques sont bien typées
+    df_plot_clean = df_plot_clean.with_columns([
+        pl.col('puissance_souscrite_kva').cast(pl.Int64),
+        pl.col('turpe_total_eur').cast(pl.Float64),
+        pl.col('turpe_fixe_eur').cast(pl.Float64),
+        pl.col('turpe_variable_eur').cast(pl.Float64),
+    ])
+
+    # Convertir en pandas pour Altair (plus de compatibilité qu'avec to_dicts)
+    data_plot = df_plot_clean.to_pandas()
+
+    # Préparer les marqueurs (utiliser les MÊMES noms de colonnes que data_plot)
     import pandas as pd
-    point_actuel_pd = pd.DataFrame({
-        'puissance': [cout_actuel['puissance_souscrite_kva'][0]],
-        'cout': [cout_actuel['turpe_total_eur'][0]],
-        'label': ['Actuel'],
-        'type': ['actuel']
-    })
+    points_speciaux = pd.DataFrame([
+        {
+            'puissance_souscrite_kva': cout_actuel['puissance_souscrite_kva'][0],
+            'turpe_total_eur': cout_actuel['turpe_total_eur'][0],
+            'label': 'Actuel',
+            'type': 'actuel'
+        },
+        {
+            'puissance_souscrite_kva': optimum_graph['puissance_souscrite_kva'][0],
+            'turpe_total_eur': optimum_graph['turpe_total_eur'][0],
+            'label': 'Optimal',
+            'type': 'optimal'
+        }
+    ])
 
-    point_optimal_pd = pd.DataFrame({
-        'puissance': [optimum_graph['puissance_souscrite_kva'][0]],
-        'cout': [optimum_graph['turpe_total_eur'][0]],
-        'label': ['Optimal'],
-        'type': ['optimal']
-    })
-
-    points_speciaux_pd = pd.concat([point_actuel_pd, point_optimal_pd])
-
-    # Graphique principal (scénarios d'optimisation)
-    chart = alt.Chart(df_plot_clean.to_pandas()).mark_line(point=True).encode(
+    # Graphique principal : séparer lignes et points pour que les courbes s'affichent
+    # Base commune (passer data_plot directement, pas via alt.Data)
+    base = alt.Chart(data_plot).encode(
         x=alt.X('puissance_souscrite_kva:Q', title='Puissance souscrite max (kVA)'),
         y=alt.Y('turpe_total_eur:Q', title='Coût annuel TURPE (€/an)', scale=alt.Scale(zero=False)),
-        color=alt.Color('formule_tarifaire_acheminement:N', title='Formule tarifaire'),
+        color=alt.Color('formule_tarifaire_acheminement:N', title='Formule tarifaire')
+    )
+
+    # Lignes reliant les points par FTA
+    lines = base.mark_line()
+
+    # Points avec tooltips détaillés
+    points = base.mark_circle(size=60).encode(
         tooltip=[
             alt.Tooltip('puissance_hph_kva:Q', title='P HPH (kVA)'),
             alt.Tooltip('puissance_hch_kva:Q', title='P HCH (kVA)'),
@@ -1095,47 +1118,54 @@ def _(cout_actuel, resultats):
             alt.Tooltip('turpe_variable_eur:Q', title='Part variable (€)', format='.2f'),
             alt.Tooltip('turpe_total_eur:Q', title='Total (€)', format='.2f'),
         ]
-    ).properties(
+    )
+
+    # Combiner lignes et points
+    chart = (lines + points).properties(
         width=800,
         height=500,
         title=f"Coût TURPE vs Puissance souscrite max (HCB) - PDL {pdl_unique}"
     )
 
     # Marqueurs pour actuel et optimal
-    marqueurs = alt.Chart(points_speciaux_pd).mark_point(
+    marqueurs = alt.Chart(points_speciaux).mark_point(
         size=300,
         shape='diamond',
         filled=True,
         opacity=0.8
     ).encode(
-        x=alt.X('puissance:Q'),
-        y=alt.Y('cout:Q'),
+        x='puissance_souscrite_kva:Q',
+        y='turpe_total_eur:Q',
         color=alt.Color('type:N',
             scale=alt.Scale(domain=['actuel', 'optimal'], range=['red', 'green']),
             legend=None
         ),
-        tooltip=[alt.Tooltip('label:N', title='Configuration')]
+        tooltip=['label:N']
     )
 
     # Labels pour les marqueurs
-    labels = alt.Chart(points_speciaux_pd).mark_text(
+    labels = alt.Chart(points_speciaux).mark_text(
         align='left',
         dx=10,
         dy=-10,
         fontSize=15,
         fontWeight='bold'
     ).encode(
-        x=alt.X('puissance:Q'),
-        y=alt.Y('cout:Q'),
-        text=alt.Text('label:N'),
+        x='puissance_souscrite_kva:Q',
+        y='turpe_total_eur:Q',
+        text='label:N',
         color=alt.Color('type:N',
             scale=alt.Scale(domain=['actuel', 'optimal'], range=['red', 'green']),
             legend=None
         )
     )
 
-    # Superposer les couches
-    final_chart = (chart + marqueurs + labels).interactive()
+    # Superposer toutes les couches avec l'opérateur +
+    final_chart = (
+        chart + marqueurs + labels
+    ).resolve_scale(
+        color='independent'
+    ).interactive()
 
     _note_explicative = mo.md("""
     **Note sur le graphique** :
