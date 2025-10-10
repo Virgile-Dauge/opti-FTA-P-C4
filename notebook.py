@@ -148,82 +148,34 @@ def _():
 
 
 @app.cell(hide_code=True)
-def _(enrichir_dataframe, file_upload, plages_hc):
-    # Chargement, filtrage et enrichissement en une seule opération (optimisation mémoire WASM)
-    mo.stop(not file_upload.value, mo.md("⚠️ Veuillez uploader un fichier CSV pour commencer l'analyse"))
+def _(expr_cadran, expr_pas_heures, expr_volume, file_upload, plages_hc):
+    mo.stop(not file_upload.value, mo.md("⚠️ Veuillez uploader un fichier CSV"))
 
+    # Écrire le CSV dans un fichier temporaire pour scan_csv
+    import tempfile
     csv_content = file_upload.contents()
-    _cdc_tmp = pl.read_csv(io.BytesIO(csv_content), separator=';')
+    _temp_csv = tempfile.NamedTemporaryFile(mode='wb', suffix='.csv', delete=False)
+    _temp_csv.write(csv_content)
+    _temp_csv.close()
 
-    # Vérification colonnes
-    colonnes_requises = ['Horodate', 'Grandeur physique', 'Valeur', 'Pas']
-    colonnes_manquantes = [col for col in colonnes_requises if col not in _cdc_tmp.columns]
-
-    mo.stop(colonnes_manquantes, mo.md(f"❌ Colonnes manquantes : {', '.join(colonnes_manquantes)}"))
-
-    # Filtrer PA et convertir
-    _cdc_brut = (
-        _cdc_tmp
+    # Pipeline LAZY complet - AUCUN collect()
+    cdc_lazy = (
+        pl.scan_csv(_temp_csv.name, separator=';')
         .filter(pl.col('Grandeur physique') == 'PA')
         .with_columns([
             pl.col('Horodate').str.strptime(pl.Datetime, '%Y-%m-%d %H:%M:%S'),
-            (pl.col('Valeur') / 1000.0).alias('Valeur'),  # Watts -> kW
+            (pl.col('Valeur') / 1000.0).alias('Valeur'),
         ])
-        .select(['Horodate', 'Valeur', 'Pas', 'Identifiant PRM'])
+        .with_columns([
+            expr_pas_heures().alias('pas_heures')
+        ])
+        .with_columns([
+            expr_volume().alias('volume'),
+            expr_cadran(plages_hc).alias('cadran')
+        ])
+        .select(['Valeur', 'pas_heures', 'cadran', 'Horodate', 'Identifiant PRM', 'volume'])
     )
-
-    mo.stop(_cdc_brut.is_empty(), mo.md("❌ Aucune donnée de Puissance Active (PA) trouvée"))
-
-    # Enrichissement immédiat avec cadrans (pas de copie intermédiaire)
-    cdc = enrichir_dataframe(_cdc_brut, plages_hc)
-
-    # Statistiques pour affichage
-    duree_jours = (cdc['Horodate'].max() - cdc['Horodate'].min()).days
-    warning_jours = f"\n⚠️ Seulement {duree_jours} jours de données (recommandé : 365 jours)" if duree_jours < 365 else ""
-
-    pas_exemple = cdc['Pas'][0]
-    pas_uniques = cdc['Pas'].n_unique()
-    warning_pas = f"\n⚠️ Attention : {pas_uniques} pas de temps différents détectés" if pas_uniques > 1 else ""
-
-    # PRMs
-    _prms = cdc['Identifiant PRM'].unique().sort()
-    _nb_prms = len(_prms)
-
-    if _nb_prms == 1:
-        prm_info = f"ℹ️ **PRM identifié** : `{_prms[0]}`"
-    else:
-        _prms_list = '\n'.join([f"     - `{prm}`" for prm in _prms])
-        prm_info = f"""⚠️ **Attention : {_nb_prms} PRMs détectés**
-
-    {_prms_list}
-
-    Les analyses portent sur l'ensemble des données."""
-
-    # Statistiques par cadran
-    _stats_cadrans = cdc.group_by('cadran').agg([
-        pl.col('volume').sum().alias('volume_total')
-    ]).sort('cadran')
-
-    _cadrans_str = "\n".join([
-        f"     - {row['cadran']} : {row['volume_total']:.0f} kWh"
-        for row in _stats_cadrans.iter_rows(named=True)
-    ])
-
-    mo.md(f"""
-    ✅ **Données chargées et enrichies**
-
-    - Nombre de mesures : {len(cdc):,}
-    - Période : {cdc['Horodate'].min()} → {cdc['Horodate'].max()}
-    - Puissance max : {cdc['Valeur'].max():.2f} kW
-    - Pas de temps : {pas_exemple}{warning_pas}
-
-    {prm_info}
-
-    **Consommation par cadran tarifaire :**
-    {_cadrans_str}
-    {warning_jours}
-    """)
-    return (cdc,)
+    return (cdc_lazy,)
 
 
 @app.cell(hide_code=True)
@@ -318,34 +270,12 @@ def fonctions_enrichissement():
             Expression Polars retournant le cadran (ex: 'HPH', 'HCB')
         """
         return expr_horaire(plages) + expr_saison()
-
-    def enrichir_dataframe(df: pl.DataFrame, plages_hc: list[tuple[time, time]]) -> pl.DataFrame:
-        """
-        Enrichit le DataFrame avec les colonnes pas_heures, volume et cadran.
-
-        Args:
-            df: DataFrame avec colonnes 'Horodate', 'Valeur', 'Pas'
-            plages_hc: Liste de tuples (heure_debut, heure_fin) pour les HC
-
-        Returns:
-            DataFrame enrichi avec colonnes supplémentaires
-        """
-        return (
-            df
-            .with_columns([
-                expr_pas_heures().alias('pas_heures')
-            ])
-            .with_columns([
-                expr_volume().alias('volume'),
-                expr_cadran(plages_hc).alias('cadran')
-            ])
-        )
-    return (enrichir_dataframe,)
+    return expr_cadran, expr_pas_heures, expr_volume
 
 
 @app.cell
-def _(cdc):
-    cdc
+def _(cdc_lazy):
+    cdc_lazy.collect()
     return
 
 
@@ -356,26 +286,28 @@ def _():
 
 
 @app.cell(hide_code=True)
-def _(cdc):
+def _(cdc_lazy):
     # Étape 1: Calculer les dates globales par PDL (AVANT le pivot)
     dates_pdl = (
-        cdc
+        cdc_lazy
         .group_by('Identifiant PRM')
         .agg([
             pl.col('Horodate').min().alias('date_debut'),
             pl.col('Horodate').max().alias('date_fin'),
             pl.col('Valeur').max().alias('pmax_moyenne_kva'),
         ])
+        .collect()
     )
 
     # Étape 2: Agrégation des énergies et pmax par PDL et cadran
     energies_par_cadran = (
-        cdc
+        cdc_lazy
         .group_by(['Identifiant PRM', 'cadran'])
         .agg([
             pl.col('volume').sum().alias('energie_kwh'),
             pl.col('Valeur').max().alias('pmax_cadran_kva'),
         ])
+        .collect()
     )
 
     # Étape 3a: Pivot des énergies
@@ -538,10 +470,14 @@ def _():
 
 
 @app.cell(hide_code=True)
-def _(cdc, consos_agregees, plage_puissance):
+def _(cdc_lazy, consos_agregees, plage_puissance):
     # Génération des scénarios multi-cadrans par réduction proportionnelle
 
     P_min, P_max = plage_puissance.value
+
+    # OPTIMISATION : Collect cdc_lazy UNE SEULE FOIS pour tous les calculs de dépassement
+    # Sélectionner uniquement les 3 colonnes nécessaires avant collect
+    cdc = cdc_lazy.select(['Valeur', 'pas_heures', 'cadran']).collect()
 
     # Mode multi-cadrans: réduction proportionnelle simultanée
 
