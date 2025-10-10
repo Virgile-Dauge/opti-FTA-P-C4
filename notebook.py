@@ -13,7 +13,7 @@ async with app.setup:
         await micropip.install("pyarrow")
         await micropip.install("xlsxwriter")
         # electricore 1.2.0+ avec core minimal compatible WASM
-        await micropip.install("electricore==1.2.1")
+        await micropip.install("electricore==1.3.3", keep_going=True)
 
     # Imports standards
     import marimo as mo
