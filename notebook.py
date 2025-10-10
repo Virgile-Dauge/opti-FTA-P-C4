@@ -968,21 +968,25 @@ def _(cout_actuel, resultats):
 def _(cout_actuel, resultats):
     # Graphique interactif avec marqueur pour le scénario actuel
     import altair as alt
-    import pandas as pd
 
     # Filtrer sur le premier PDL pour la visualisation
     pdl_unique = resultats['pdl'][0]
     df_plot = resultats.filter(pl.col('pdl') == pdl_unique)
 
+    # Exclure les colonnes de dates (Altair ne supporte pas les timezones non-UTC)
+    colonnes_sans_dates = [col for col in df_plot.columns if col not in ['debut', 'fin', 'date_debut', 'date_fin']]
+    df_plot_clean = df_plot.select(colonnes_sans_dates)
+
     # Préparer le marqueur pour le scénario actuel
-    point_actuel = pd.DataFrame([{
-        'puissance': cout_actuel['puissance_souscrite_kva'][0],
-        'cout': cout_actuel['turpe_total_eur'][0],
-        'label': 'Configuration actuelle'
-    }])
+    import pandas as pd
+    point_actuel_pd = pd.DataFrame({
+        'puissance': [cout_actuel['puissance_souscrite_kva'][0]],
+        'cout': [cout_actuel['turpe_total_eur'][0]],
+        'label': ['Configuration actuelle']
+    })
 
     # Graphique principal (scénarios d'optimisation)
-    chart = alt.Chart(df_plot.to_pandas()).mark_line(point=True).encode(
+    chart = alt.Chart(df_plot_clean.to_pandas()).mark_line(point=True).encode(
         x=alt.X('puissance_souscrite_kva:Q', title='Puissance souscrite max (kVA)'),
         y=alt.Y('turpe_total_eur:Q', title='Coût annuel TURPE (€/an)', scale=alt.Scale(zero=False)),
         color=alt.Color('formule_tarifaire_acheminement:N', title='Formule tarifaire'),
@@ -1003,7 +1007,7 @@ def _(cout_actuel, resultats):
     )
 
     # Marqueur rouge pour la configuration actuelle
-    marqueur_actuel = alt.Chart(point_actuel).mark_point(
+    marqueur_actuel = alt.Chart(point_actuel_pd).mark_point(
         size=300,
         shape='diamond',
         color='red',
@@ -1016,11 +1020,11 @@ def _(cout_actuel, resultats):
     )
 
     # Label pour le marqueur
-    label_actuel = alt.Chart(point_actuel).mark_text(
+    label_actuel = alt.Chart(point_actuel_pd).mark_text(
         align='left',
         dx=10,
         dy=-10,
-        fontSize=12,
+        fontSize=15,
         fontWeight='bold',
         color='red'
     ).encode(
@@ -1030,7 +1034,7 @@ def _(cout_actuel, resultats):
     )
 
     # Superposer les couches
-    final_chart = (chart + marqueur_actuel + label_actuel).interactive()
+    final_chart = (chart + label_actuel).interactive()
 
     _note_explicative = mo.md("""
     **Note sur le graphique** :
