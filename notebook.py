@@ -10,6 +10,7 @@ async with app.setup:
     import sys
     if "pyodide" in sys.modules:
         import micropip
+        await micropip.install("polars")
         await micropip.install("pyarrow")
         await micropip.install("xlsxwriter")
         # electricore 1.2.0+ avec core minimal compatible WASM
@@ -1095,19 +1096,11 @@ def _(cout_actuel, resultats):
         }
     ])
 
-    # Graphique principal : séparer lignes et points pour que les courbes s'affichent
-    # Base commune (passer data_plot directement, pas via alt.Data)
-    base = alt.Chart(data_plot).encode(
+    # Graphique principal : lignes + points en une seule couche
+    chart = alt.Chart(data_plot).mark_line(point=True).encode(
         x=alt.X('puissance_souscrite_kva:Q', title='Puissance souscrite max (kVA)'),
         y=alt.Y('turpe_total_eur:Q', title='Coût annuel TURPE (€/an)', scale=alt.Scale(zero=False)),
-        color=alt.Color('formule_tarifaire_acheminement:N', title='Formule tarifaire')
-    )
-
-    # Lignes reliant les points par FTA
-    lines = base.mark_line()
-
-    # Points avec tooltips détaillés
-    points = base.mark_circle(size=60).encode(
+        color=alt.Color('formule_tarifaire_acheminement:N', title='Formule tarifaire'),
         tooltip=[
             alt.Tooltip('puissance_hph_kva:Q', title='P HPH (kVA)'),
             alt.Tooltip('puissance_hch_kva:Q', title='P HCH (kVA)'),
@@ -1118,10 +1111,7 @@ def _(cout_actuel, resultats):
             alt.Tooltip('turpe_variable_eur:Q', title='Part variable (€)', format='.2f'),
             alt.Tooltip('turpe_total_eur:Q', title='Total (€)', format='.2f'),
         ]
-    )
-
-    # Combiner lignes et points
-    chart = (lines + points).properties(
+    ).properties(
         width=800,
         height=500,
         title=f"Coût TURPE vs Puissance souscrite max (HCB) - PDL {pdl_unique}"
