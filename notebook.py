@@ -1047,24 +1047,38 @@ def _(cout_actuel, resultats):
 
 @app.cell(hide_code=True)
 def _(cout_actuel, resultats):
-    # Graphique interactif avec marqueur pour le scénario actuel
+    # Graphique interactif avec marqueurs pour actuel et optimal
     import altair as alt
 
     # Filtrer sur le premier PDL pour la visualisation
     pdl_unique = resultats['pdl'][0]
     df_plot = resultats.filter(pl.col('pdl') == pdl_unique)
 
+    # Trouver l'optimum
+    idx_opt_graph = df_plot['turpe_total_eur'].arg_min()
+    optimum_graph = df_plot[idx_opt_graph]
+
     # Exclure les colonnes de dates (Altair ne supporte pas les timezones non-UTC)
     colonnes_sans_dates = [col for col in df_plot.columns if col not in ['debut', 'fin', 'date_debut', 'date_fin']]
     df_plot_clean = df_plot.select(colonnes_sans_dates)
 
-    # Préparer le marqueur pour le scénario actuel
+    # Préparer les marqueurs
     import pandas as pd
     point_actuel_pd = pd.DataFrame({
         'puissance': [cout_actuel['puissance_souscrite_kva'][0]],
         'cout': [cout_actuel['turpe_total_eur'][0]],
-        'label': ['Configuration actuelle']
+        'label': ['Actuel'],
+        'type': ['actuel']
     })
+
+    point_optimal_pd = pd.DataFrame({
+        'puissance': [optimum_graph['puissance_souscrite_kva'][0]],
+        'cout': [optimum_graph['turpe_total_eur'][0]],
+        'label': ['Optimal'],
+        'type': ['optimal']
+    })
+
+    points_speciaux_pd = pd.concat([point_actuel_pd, point_optimal_pd])
 
     # Graphique principal (scénarios d'optimisation)
     chart = alt.Chart(df_plot_clean.to_pandas()).mark_line(point=True).encode(
@@ -1087,39 +1101,46 @@ def _(cout_actuel, resultats):
         title=f"Coût TURPE vs Puissance souscrite max (HCB) - PDL {pdl_unique}"
     )
 
-    # Marqueur rouge pour la configuration actuelle
-    marqueur_actuel = alt.Chart(point_actuel_pd).mark_point(
+    # Marqueurs pour actuel et optimal
+    marqueurs = alt.Chart(points_speciaux_pd).mark_point(
         size=300,
         shape='diamond',
-        color='red',
         filled=True,
         opacity=0.8
     ).encode(
         x=alt.X('puissance:Q'),
         y=alt.Y('cout:Q'),
+        color=alt.Color('type:N',
+            scale=alt.Scale(domain=['actuel', 'optimal'], range=['red', 'green']),
+            legend=None
+        ),
         tooltip=[alt.Tooltip('label:N', title='Configuration')]
     )
 
-    # Label pour le marqueur
-    label_actuel = alt.Chart(point_actuel_pd).mark_text(
+    # Labels pour les marqueurs
+    labels = alt.Chart(points_speciaux_pd).mark_text(
         align='left',
         dx=10,
         dy=-10,
         fontSize=15,
-        fontWeight='bold',
-        color='red'
+        fontWeight='bold'
     ).encode(
         x=alt.X('puissance:Q'),
         y=alt.Y('cout:Q'),
-        text=alt.value('⬥ Actuel')
+        text=alt.Text('label:N'),
+        color=alt.Color('type:N',
+            scale=alt.Scale(domain=['actuel', 'optimal'], range=['red', 'green']),
+            legend=None
+        )
     )
 
     # Superposer les couches
-    final_chart = (chart + label_actuel).interactive()
+    final_chart = (chart + marqueurs + labels).interactive()
 
     _note_explicative = mo.md("""
     **Note sur le graphique** :
-    - **⬥ Point rouge** : Configuration actuelle
+    - **⬥ Point rouge (Actuel)** : Configuration actuelle
+    - **⬥ Point vert (Optimal)** : Configuration optimale recommandée
     - **BTINF** (< 36 kVA) : mono-puissance, l'axe X représente la puissance unique souscrite
     - **BTSUP** (≥ 36 kVA) : multi-cadrans, l'axe X représente la puissance max (HCB)
     - Pour BTSUP, les 4 puissances par cadran (HPH ≤ HCH ≤ HPB ≤ HCB) sont visibles dans le tooltip
