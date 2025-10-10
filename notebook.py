@@ -471,7 +471,10 @@ def _():
 
 
 @app.function(hide_code=True)
-def generer_scenarios_reduction_proportionnelle(consos_agregees: pl.DataFrame) -> pl.DataFrame:
+def generer_scenarios_reduction_proportionnelle(
+    consos_agregees: pl.DataFrame,
+    config_actuelle: dict = None
+) -> pl.DataFrame:
     """
     Génère les scénarios multi-cadrans par réduction proportionnelle simultanée.
 
@@ -479,6 +482,12 @@ def generer_scenarios_reduction_proportionnelle(consos_agregees: pl.DataFrame) -
     - Part de (pmax_hph, pmax_hch, pmax_hpb, pmax_hcb) × 1.15 arrondi
     - Applique la contrainte P_hph ≤ P_hch ≤ P_hpb ≤ P_hcb
     - Réduit toutes les puissances de 1 kVA simultanément jusqu'à ce que le min atteigne 36
+
+    Args:
+        consos_agregees: DataFrame avec les consommations agrégées
+        config_actuelle: Dict optionnel avec les clés:
+            - 'fta': formule tarifaire actuelle (ex: 'BTSUPCU')
+            - 'p_hph', 'p_hch', 'p_hpb', 'p_hcb': puissances actuelles par cadran
 
     Hypothèse : Le profil de charge est similaire entre cadrans (seule l'amplitude diffère)
     """
@@ -537,6 +546,22 @@ def generer_scenarios_reduction_proportionnelle(consos_agregees: pl.DataFrame) -
             pl.col('puissance_hcb_kva').alias('puissance_souscrite_kva'),  # Max pour compatibilité
         ])
     )
+
+    # Marquer le scénario actuel si fourni
+    if config_actuelle is not None:
+        df_scenarios = df_scenarios.with_columns([
+            (
+                (pl.col('formule_tarifaire_acheminement') == config_actuelle['fta']) &
+                (pl.col('puissance_hph_kva') == config_actuelle['p_hph']) &
+                (pl.col('puissance_hch_kva') == config_actuelle['p_hch']) &
+                (pl.col('puissance_hpb_kva') == config_actuelle['p_hpb']) &
+                (pl.col('puissance_hcb_kva') == config_actuelle['p_hcb'])
+            ).alias('est_scenario_actuel')
+        ])
+    else:
+        df_scenarios = df_scenarios.with_columns([
+            pl.lit(False).alias('est_scenario_actuel')
+        ])
 
     return df_scenarios
 
@@ -630,12 +655,15 @@ def _(
             pl.col('puissance_hpb_kva').cast(pl.Int64),
             pl.col('puissance_hcb_kva').cast(pl.Int64),
             pl.col('duree_depassement_h').cast(pl.Float64),
+            # Marquer comme scénario actuel
+            pl.lit(True).alias('est_scenario_actuel'),
         ])
         .select([
             'pdl', 'energie_hph_kwh', 'energie_hch_kwh', 'energie_hpb_kwh', 'energie_hcb_kwh',
             'date_debut', 'date_fin', 'nb_jours',
             'puissance_souscrite_kva', 'formule_tarifaire_acheminement', 'duree_depassement_h',
-            'puissance_hph_kva', 'puissance_hch_kva', 'puissance_hpb_kva', 'puissance_hcb_kva'
+            'puissance_hph_kva', 'puissance_hch_kva', 'puissance_hpb_kva', 'puissance_hcb_kva',
+            'est_scenario_actuel'
         ])
     )
     return (scenario_actuel,)
@@ -647,7 +675,17 @@ def _():
 
 
 @app.cell(hide_code=True)
-def _(cdc_lazy, consos_agregees, plage_puissance):
+def _(
+    cdc_lazy,
+    consos_agregees,
+    fta_actuel,
+    plage_puissance,
+    puissance_actuelle_hcb,
+    puissance_actuelle_hch,
+    puissance_actuelle_hpb,
+    puissance_actuelle_hph,
+    puissance_actuelle_mono,
+):
     # Génération des scénarios multi-cadrans par réduction proportionnelle
 
     P_min, P_max = plage_puissance.value
@@ -662,6 +700,12 @@ def _(cdc_lazy, consos_agregees, plage_puissance):
     scenarios_btinf = None
     if P_min < 36:
         puissances_btinf = list(range(P_min, min(36, P_max + 1)))
+
+        # Identifier le scénario actuel si c'est BTINF
+        _is_btinf_actuel = fta_actuel.value in ['BTINFCU4', 'BTINFMU4', 'BTINFLU']
+        _puissance_actuel = float(puissance_actuelle_mono.value) if _is_btinf_actuel else None
+        _fta_actuel = fta_actuel.value if _is_btinf_actuel else None
+
         scenarios_btinf = (
             consos_agregees
             .select(['pdl', 'energie_hph_kwh', 'energie_hch_kwh',
@@ -677,7 +721,18 @@ def _(cdc_lazy, consos_agregees, plage_puissance):
                 pl.lit(['BTINFCU4', 'BTINFMU4', 'BTINFLU']).alias('formule_tarifaire_acheminement')
             ])
             .explode('formule_tarifaire_acheminement')
-            .filter(pl.col('puissance_souscrite_kva') >= pl.col('pmax_estimee_kva'))
+            .with_columns([
+                # Marquer le scénario actuel
+                (
+                    (pl.col('puissance_souscrite_kva') == _puissance_actuel) &
+                    (pl.col('formule_tarifaire_acheminement') == _fta_actuel)
+                ).fill_null(False).alias('est_scenario_actuel')
+            ])
+            .filter(
+                # Garder soit les scénarios valides, soit le scénario actuel
+                (pl.col('puissance_souscrite_kva') >= pl.col('pmax_estimee_kva')) |
+                pl.col('est_scenario_actuel')
+            )
             .with_columns([
                 # Remplir les 4 colonnes avec la puissance mono pour BTINF
                 pl.col('puissance_souscrite_kva').alias('puissance_hph_kva'),
@@ -703,7 +758,22 @@ def _(cdc_lazy, consos_agregees, plage_puissance):
         )
 
     # Étape 2: Scénarios BTSUP multi-cadrans (≥ 36 kVA) - Réduction proportionnelle
-    scenarios_btsup = generer_scenarios_reduction_proportionnelle(consos_agregees)
+    # Identifier le scénario actuel si c'est BTSUP
+    _is_btsup_actuel = fta_actuel.value in ['BTSUPCU', 'BTSUPLU']
+    _config_actuelle_btsup = None
+    if _is_btsup_actuel:
+        _config_actuelle_btsup = {
+            'fta': fta_actuel.value,
+            'p_hph': float(puissance_actuelle_hph.value),
+            'p_hch': float(puissance_actuelle_hch.value),
+            'p_hpb': float(puissance_actuelle_hpb.value),
+            'p_hcb': float(puissance_actuelle_hcb.value),
+        }
+
+    scenarios_btsup = generer_scenarios_reduction_proportionnelle(
+        consos_agregees,
+        config_actuelle=_config_actuelle_btsup
+    )
 
     # Calculer dépassements pour BTSUP
     scenarios_btsup = scenarios_btsup.with_columns([
@@ -726,7 +796,8 @@ def _(cdc_lazy, consos_agregees, plage_puissance):
         'pdl', 'energie_hph_kwh', 'energie_hch_kwh', 'energie_hpb_kwh', 'energie_hcb_kwh',
         'date_debut', 'date_fin', 'nb_jours',
         'puissance_souscrite_kva', 'formule_tarifaire_acheminement', 'duree_depassement_h',
-        'puissance_hph_kva', 'puissance_hch_kva', 'puissance_hpb_kva', 'puissance_hcb_kva'
+        'puissance_hph_kva', 'puissance_hch_kva', 'puissance_hpb_kva', 'puissance_hcb_kva',
+        'est_scenario_actuel'
     ]
 
     # Ajouter pmax_estimee_kva si nécessaire pour BTINF
@@ -854,8 +925,8 @@ def _(scenario_actuel, scenarios):
     )
 
     # Séparer scénario actuel vs résultats d'optimisation
-    cout_actuel = resultats_tous[0]  # Première ligne = scénario actuel
-    resultats = resultats_tous[1:]  # Reste = scénarios d'optimisation
+    cout_actuel = resultats_tous.filter(pl.col('est_scenario_actuel') == True)
+    resultats = resultats_tous.filter(pl.col('est_scenario_actuel') == False)
 
     _nb_resultats = len(resultats)
     _cout_min = resultats['turpe_total_eur'].min()
