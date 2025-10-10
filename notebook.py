@@ -141,6 +141,83 @@ def _():
     return (plage_puissance,)
 
 
+@app.cell(hide_code=True)
+def _():
+    mo.md(
+        r"""
+    ## 📋 Configuration actuelle (optionnel)
+
+    Saisissez votre configuration tarifaire actuelle pour comparer avec l'optimum recommandé.
+    """
+    )
+    return
+
+
+@app.cell
+def _():
+    # Dropdown FTA
+    fta_actuel = mo.ui.dropdown(
+        options={
+            'BTINFCU4': 'BTINFCU4',
+            'BTINFMU4': 'BTINFMU4',
+            'BTINFLU': 'BTINFLU',
+            'BTSUPCU': 'BTSUPCU',
+            'BTSUPLU': 'BTSUPLU'
+        },
+        value='BTSUPCU',
+        label="Formule tarifaire actuelle"
+    )
+
+    # Inputs pour puissances
+    # Mono-puissance (BTINF)
+    puissance_actuelle_mono = mo.ui.number(
+        value=36,
+        start=3,
+        stop=250,
+        step=1,
+        label="Puissance souscrite (kVA)"
+    )
+
+    # Multi-cadrans (BTSUP)
+    puissance_actuelle_hph = mo.ui.number(value=36, start=36, stop=250, step=1, label="HPH (kVA)")
+    puissance_actuelle_hch = mo.ui.number(value=40, start=36, stop=250, step=1, label="HCH (kVA)")
+    puissance_actuelle_hpb = mo.ui.number(value=45, start=36, stop=250, step=1, label="HPB (kVA)")
+    puissance_actuelle_hcb = mo.ui.number(value=50, start=36, stop=250, step=1, label="HCB (kVA)")
+    return (
+        fta_actuel,
+        puissance_actuelle_hcb,
+        puissance_actuelle_hch,
+        puissance_actuelle_hpb,
+        puissance_actuelle_hph,
+        puissance_actuelle_mono,
+    )
+
+
+@app.cell(hide_code=True)
+def _(
+    fta_actuel,
+    puissance_actuelle_hcb,
+    puissance_actuelle_hch,
+    puissance_actuelle_hpb,
+    puissance_actuelle_hph,
+    puissance_actuelle_mono,
+):
+    # Affichage conditionnel
+    _is_btinf = fta_actuel.value in ['BTINFCU4', 'BTINFMU4', 'BTINFLU']
+
+    if _is_btinf:
+        _msg = mo.vstack([fta_actuel, puissance_actuelle_mono])
+    else:
+        _msg = mo.vstack([
+            fta_actuel,
+            mo.md("**Puissances souscrites par cadran tarifaire :**"),
+            mo.hstack([puissance_actuelle_hph, puissance_actuelle_hch]),
+            mo.hstack([puissance_actuelle_hpb, puissance_actuelle_hcb])
+        ])
+    _msg
+    return
+
+
 @app.cell
 def _():
     mo.md(r"""## 📥 Traitement de la courbe de charge""")
@@ -464,6 +541,106 @@ def generer_scenarios_reduction_proportionnelle(consos_agregees: pl.DataFrame) -
     return df_scenarios
 
 
+@app.cell(hide_code=True)
+def _(
+    cdc_lazy,
+    consos_agregees,
+    fta_actuel,
+    puissance_actuelle_hcb,
+    puissance_actuelle_hch,
+    puissance_actuelle_hpb,
+    puissance_actuelle_hph,
+    puissance_actuelle_mono,
+):
+    # Génération du scénario actuel pour comparaison
+
+    # Collecter cdc pour le calcul de dépassement
+    _cdc_actuel = cdc_lazy.select(['Valeur', 'pas_heures', 'cadran']).collect()
+
+    # Récupérer les énergies depuis consos_agregees (1 ligne par PDL)
+    _row_actuel = consos_agregees[0]
+
+    # Déterminer si mono ou multi-puissance
+    _is_btinf_actuel = fta_actuel.value in ['BTINFCU4', 'BTINFMU4', 'BTINFLU']
+
+    if _is_btinf_actuel:
+        # Mono-puissance
+        _p_mono = float(puissance_actuelle_mono.value)
+        _scenario_actuel_dict = {
+            'pdl': _row_actuel['pdl'][0],
+            'energie_hph_kwh': float(_row_actuel['energie_hph_kwh'][0]),
+            'energie_hch_kwh': float(_row_actuel['energie_hch_kwh'][0]),
+            'energie_hpb_kwh': float(_row_actuel['energie_hpb_kwh'][0]),
+            'energie_hcb_kwh': float(_row_actuel['energie_hcb_kwh'][0]),
+            'puissance_souscrite_kva': _p_mono,
+            'puissance_hph_kva': _p_mono,
+            'puissance_hch_kva': _p_mono,
+            'puissance_hpb_kva': _p_mono,
+            'puissance_hcb_kva': _p_mono,
+            'formule_tarifaire_acheminement': fta_actuel.value,
+            'date_debut': datetime(2025, 8, 1),
+            'date_fin': datetime(2026, 7, 31),
+            'nb_jours': 365,
+        }
+    else:
+        # Multi-cadrans
+        _scenario_actuel_dict = {
+            'pdl': _row_actuel['pdl'][0],
+            'energie_hph_kwh': float(_row_actuel['energie_hph_kwh'][0]),
+            'energie_hch_kwh': float(_row_actuel['energie_hch_kwh'][0]),
+            'energie_hpb_kwh': float(_row_actuel['energie_hpb_kwh'][0]),
+            'energie_hcb_kwh': float(_row_actuel['energie_hcb_kwh'][0]),
+            'puissance_hph_kva': float(puissance_actuelle_hph.value),
+            'puissance_hch_kva': float(puissance_actuelle_hch.value),
+            'puissance_hpb_kva': float(puissance_actuelle_hpb.value),
+            'puissance_hcb_kva': float(puissance_actuelle_hcb.value),
+            'puissance_souscrite_kva': float(puissance_actuelle_hcb.value),  # Max
+            'formule_tarifaire_acheminement': fta_actuel.value,
+            'date_debut': datetime(2025, 8, 1),
+            'date_fin': datetime(2026, 7, 31),
+            'nb_jours': 365,
+        }
+
+    # Calculer dépassement
+    _duree_depassement_actuel = calculer_duree_depassement_par_cadran(
+        _cdc_actuel,
+        _scenario_actuel_dict['puissance_hph_kva'],
+        _scenario_actuel_dict['puissance_hch_kva'],
+        _scenario_actuel_dict['puissance_hpb_kva'],
+        _scenario_actuel_dict['puissance_hcb_kva']
+    )
+    _scenario_actuel_dict['duree_depassement_h'] = _duree_depassement_actuel
+
+    # Créer DataFrame avec colonnes dans le même ordre que scenarios
+    scenario_actuel = (
+        pl.DataFrame([_scenario_actuel_dict])
+        .with_columns([
+            # Ajouter timezone pour compatibilité avec scenarios
+            pl.col('date_debut').dt.replace_time_zone('Europe/Paris'),
+            pl.col('date_fin').dt.replace_time_zone('Europe/Paris'),
+            # Forcer les types numériques
+            pl.col('nb_jours').cast(pl.Int32),
+            pl.col('energie_hph_kwh').cast(pl.Float64),
+            pl.col('energie_hch_kwh').cast(pl.Float64),
+            pl.col('energie_hpb_kwh').cast(pl.Float64),
+            pl.col('energie_hcb_kwh').cast(pl.Float64),
+            pl.col('puissance_souscrite_kva').cast(pl.Int64),
+            pl.col('puissance_hph_kva').cast(pl.Int64),
+            pl.col('puissance_hch_kva').cast(pl.Int64),
+            pl.col('puissance_hpb_kva').cast(pl.Int64),
+            pl.col('puissance_hcb_kva').cast(pl.Int64),
+            pl.col('duree_depassement_h').cast(pl.Float64),
+        ])
+        .select([
+            'pdl', 'energie_hph_kwh', 'energie_hch_kwh', 'energie_hpb_kwh', 'energie_hcb_kwh',
+            'date_debut', 'date_fin', 'nb_jours',
+            'puissance_souscrite_kva', 'formule_tarifaire_acheminement', 'duree_depassement_h',
+            'puissance_hph_kva', 'puissance_hch_kva', 'puissance_hpb_kva', 'puissance_hcb_kva'
+        ])
+    )
+    return (scenario_actuel,)
+
+
 @app.cell
 def _():
     return
@@ -635,15 +812,16 @@ def _():
 
 
 @app.cell(hide_code=True)
-def _(scenarios):
+def _(scenario_actuel, scenarios):
     # Charger les règles TURPE une seule fois
     regles_turpe = load_turpe_rules()
 
-    # Calcul TURPE via electricore
-    # Préparer les données au format attendu par electricore
+    # Concaténer scénario actuel avec les scénarios d'optimisation
+    tous_scenarios = pl.concat([scenario_actuel, scenarios])
 
-    resultats = (
-        scenarios
+    # Calcul TURPE via electricore sur tous les scénarios
+    resultats_tous = (
+        tous_scenarios
         .rename({
             'date_debut': 'debut',
             'date_fin': 'fin'
@@ -670,26 +848,29 @@ def _(scenarios):
         .pipe(ajouter_turpe_fixe, regles=regles_turpe)
         .pipe(ajouter_turpe_variable, regles=regles_turpe)
         .with_columns([
-            # Renommer pour cohérence (electricore utilise suffixe _eur)
-            # pl.col('turpe_fixe_eur').alias('turpe_fixe'),
-            # pl.col('turpe_variable_eur').alias('turpe_variable'),
             (pl.col('turpe_fixe_eur') + pl.col('turpe_variable_eur')).alias('turpe_total_eur')
         ])
         .collect()
     )
 
+    # Séparer scénario actuel vs résultats d'optimisation
+    cout_actuel = resultats_tous[0]  # Première ligne = scénario actuel
+    resultats = resultats_tous[1:]  # Reste = scénarios d'optimisation
+
     _nb_resultats = len(resultats)
     _cout_min = resultats['turpe_total_eur'].min()
     _cout_max = resultats['turpe_total_eur'].max()
+    _cout_actuel_val = cout_actuel['turpe_total_eur'][0]
 
     mo.md(f"""
     ✅ **Calculs TURPE terminés**
 
     - Scénarios calculés : {_nb_resultats:,}
-    - Coût min : {_cout_min:.2f} €/an
+    - **Coût actuel** : **{_cout_actuel_val:,.2f} €/an**
+    - Coût min (optimisé) : {_cout_min:.2f} €/an
     - Coût max : {_cout_max:.2f} €/an
     """)
-    return (resultats,)
+    return cout_actuel, resultats
 
 
 @app.cell
@@ -705,10 +886,41 @@ def _():
 
 
 @app.cell(hide_code=True)
-def _(resultats):
+def _(cout_actuel, resultats):
     # Trouver l'optimum global (toutes FTA confondues)
     idx_opt = resultats['turpe_total_eur'].arg_min()
     optimum = resultats[idx_opt]
+
+    # Calculer économies
+    economie_annuelle = cout_actuel['turpe_total_eur'][0] - optimum['turpe_total_eur'][0]
+    economie_pct = (economie_annuelle / cout_actuel['turpe_total_eur'][0]) * 100
+
+    # Affichage des puissances pour actuel et optimum
+    fta_actuel_val = cout_actuel['formule_tarifaire_acheminement'][0]
+    fta_opt = optimum['formule_tarifaire_acheminement'][0]
+
+    is_multi_actuel = fta_actuel_val.startswith('BTSUP')
+    is_multi_opt = fta_opt.startswith('BTSUP')
+
+    if is_multi_actuel:
+        puissances_actuel = f"{cout_actuel['puissance_hph_kva'][0]:.0f} / {cout_actuel['puissance_hch_kva'][0]:.0f} / {cout_actuel['puissance_hpb_kva'][0]:.0f} / {cout_actuel['puissance_hcb_kva'][0]:.0f} kVA"
+    else:
+        puissances_actuel = f"{cout_actuel['puissance_souscrite_kva'][0]:.0f} kVA"
+
+    if is_multi_opt:
+        puissances_opt = f"{optimum['puissance_hph_kva'][0]:.0f} / {optimum['puissance_hch_kva'][0]:.0f} / {optimum['puissance_hpb_kva'][0]:.0f} / {optimum['puissance_hcb_kva'][0]:.0f} kVA"
+        puissances_detail_opt = f"""
+    - **Puissances souscrites par cadran** :
+      - HPH : **{optimum['puissance_hph_kva'][0]:.0f} kVA**
+      - HCH : **{optimum['puissance_hch_kva'][0]:.0f} kVA**
+      - HPB : **{optimum['puissance_hpb_kva'][0]:.0f} kVA**
+      - HCB : **{optimum['puissance_hcb_kva'][0]:.0f} kVA**
+    """
+    else:
+        puissances_opt = f"{optimum['puissance_souscrite_kva'][0]:.0f} kVA"
+        puissances_detail_opt = f"""
+    - **Puissance souscrite** : **{optimum['puissance_souscrite_kva'][0]:.0f} kVA** (mono-puissance)
+    """
 
     # Optimums par FTA
     optimums_par_fta = (
@@ -723,35 +935,25 @@ def _(resultats):
         .sort('cout_min_eur')
     )
 
-    # Affichage des puissances par cadran pour l'optimum
-    fta_opt = optimum['formule_tarifaire_acheminement'][0]
-
-    # Déterminer si c'est multi-puissances (BTSUP) ou mono-puissance (BTINF)
-    is_multi = fta_opt.startswith('BTSUP')
-
-    if is_multi:
-        puissances_detail = f"""
-    - **Puissances souscrites par cadran** :
-      - HPH : **{optimum['puissance_hph_kva'][0]:.0f} kVA**
-      - HCH : **{optimum['puissance_hch_kva'][0]:.0f} kVA**
-      - HPB : **{optimum['puissance_hpb_kva'][0]:.0f} kVA**
-      - HCB : **{optimum['puissance_hcb_kva'][0]:.0f} kVA**
-    """
-    else:
-        puissances_detail = f"""
-    - **Puissance souscrite** : **{optimum['puissance_souscrite_kva'][0]:.0f} kVA** (mono-puissance)
-    """
-
     mo.md(f"""
     ## 🏆 Recommandation optimale
 
-    **Meilleure configuration** :
+    ### 📊 Comparaison Actuel vs Optimum
+
+    | | **Configuration actuelle** | **Optimum recommandé** | **Gain** |
+    |---|:---:|:---:|:---:|
+    | **Formule tarifaire** | {fta_actuel_val} | {fta_opt} | - |
+    | **Puissance(s)** | {puissances_actuel} | {puissances_opt} | - |
+    | **Part fixe** | {cout_actuel['turpe_fixe_eur'][0]:,.2f} € | {optimum['turpe_fixe_eur'][0]:,.2f} € | {cout_actuel['turpe_fixe_eur'][0] - optimum['turpe_fixe_eur'][0]:,.2f} € |
+    | **Part variable** | {cout_actuel['turpe_variable_eur'][0]:,.2f} € | {optimum['turpe_variable_eur'][0]:,.2f} € | {cout_actuel['turpe_variable_eur'][0] - optimum['turpe_variable_eur'][0]:,.2f} € |
+    | **📈 COÛT TOTAL** | **{cout_actuel['turpe_total_eur'][0]:,.2f} €/an** | **{optimum['turpe_total_eur'][0]:,.2f} €/an** | **🎉 {economie_annuelle:,.2f} € ({economie_pct:.1f}%)** |
+
+    ---
+
+    **Détails de la configuration optimale :**
     - **PDL** : `{optimum['pdl'][0]}`
-    {puissances_detail}
-    - **Formule tarifaire** : **{optimum['formule_tarifaire_acheminement'][0]}**
-    - **Coût annuel TURPE** : **{optimum['turpe_total_eur'][0]:,.2f} €/an**
-      - Part fixe : {optimum['turpe_fixe_eur'][0]:,.2f} €/an
-      - Part variable : {optimum['turpe_variable_eur'][0]:,.2f} €/an
+    {puissances_detail_opt}
+    - **Formule tarifaire** : **{fta_opt}**
 
     ---
 
@@ -763,15 +965,23 @@ def _(resultats):
 
 
 @app.cell(hide_code=True)
-def _(resultats):
-    # Graphique interactif
+def _(cout_actuel, resultats):
+    # Graphique interactif avec marqueur pour le scénario actuel
     import altair as alt
+    import pandas as pd
 
     # Filtrer sur le premier PDL pour la visualisation
     pdl_unique = resultats['pdl'][0]
     df_plot = resultats.filter(pl.col('pdl') == pdl_unique)
 
-    # Créer le graphique avec les puissances par cadran
+    # Préparer le marqueur pour le scénario actuel
+    point_actuel = pd.DataFrame([{
+        'puissance': cout_actuel['puissance_souscrite_kva'][0],
+        'cout': cout_actuel['turpe_total_eur'][0],
+        'label': 'Configuration actuelle'
+    }])
+
+    # Graphique principal (scénarios d'optimisation)
     chart = alt.Chart(df_plot.to_pandas()).mark_line(point=True).encode(
         x=alt.X('puissance_souscrite_kva:Q', title='Puissance souscrite max (kVA)'),
         y=alt.Y('turpe_total_eur:Q', title='Coût annuel TURPE (€/an)', scale=alt.Scale(zero=False)),
@@ -790,17 +1000,48 @@ def _(resultats):
         width=800,
         height=500,
         title=f"Coût TURPE vs Puissance souscrite max (HCB) - PDL {pdl_unique}"
-    ).interactive()
+    )
+
+    # Marqueur rouge pour la configuration actuelle
+    marqueur_actuel = alt.Chart(point_actuel).mark_point(
+        size=300,
+        shape='diamond',
+        color='red',
+        filled=True,
+        opacity=0.8
+    ).encode(
+        x=alt.X('puissance:Q'),
+        y=alt.Y('cout:Q'),
+        tooltip=[alt.Tooltip('label:N', title='Configuration')]
+    )
+
+    # Label pour le marqueur
+    label_actuel = alt.Chart(point_actuel).mark_text(
+        align='left',
+        dx=10,
+        dy=-10,
+        fontSize=12,
+        fontWeight='bold',
+        color='red'
+    ).encode(
+        x=alt.X('puissance:Q'),
+        y=alt.Y('cout:Q'),
+        text=alt.value('⬥ Actuel')
+    )
+
+    # Superposer les couches
+    final_chart = (chart + marqueur_actuel + label_actuel).interactive()
 
     _note_explicative = mo.md("""
     **Note sur le graphique** :
+    - **⬥ Point rouge** : Configuration actuelle
     - **BTINF** (< 36 kVA) : mono-puissance, l'axe X représente la puissance unique souscrite
     - **BTSUP** (≥ 36 kVA) : multi-cadrans, l'axe X représente la puissance max (HCB)
     - Pour BTSUP, les 4 puissances par cadran (HPH ≤ HCH ≤ HPB ≤ HCB) sont visibles dans le tooltip
     - Passez la souris sur les points pour voir le détail complet de chaque configuration
     """)
 
-    mo.vstack([mo.ui.altair_chart(chart), _note_explicative])
+    mo.vstack([mo.ui.altair_chart(final_chart), _note_explicative])
     return
 
 
