@@ -703,8 +703,6 @@ def _(
 
         # Identifier le scénario actuel si c'est BTINF
         _is_btinf_actuel = fta_actuel.value in ['BTINFCU4', 'BTINFMU4', 'BTINFLU']
-        _puissance_actuel = float(puissance_actuelle_mono.value) if _is_btinf_actuel else None
-        _fta_actuel = fta_actuel.value if _is_btinf_actuel else None
 
         scenarios_btinf = (
             consos_agregees
@@ -721,13 +719,25 @@ def _(
                 pl.lit(['BTINFCU4', 'BTINFMU4', 'BTINFLU']).alias('formule_tarifaire_acheminement')
             ])
             .explode('formule_tarifaire_acheminement')
-            .with_columns([
-                # Marquer le scénario actuel
+        )
+
+        # Marquer le scénario actuel si applicable
+        if _is_btinf_actuel:
+            _puissance_actuel = float(puissance_actuelle_mono.value)
+            _fta_actuel = fta_actuel.value
+            scenarios_btinf = scenarios_btinf.with_columns([
                 (
                     (pl.col('puissance_souscrite_kva') == _puissance_actuel) &
                     (pl.col('formule_tarifaire_acheminement') == _fta_actuel)
-                ).fill_null(False).alias('est_scenario_actuel')
+                ).alias('est_scenario_actuel')
             ])
+        else:
+            scenarios_btinf = scenarios_btinf.with_columns([
+                pl.lit(False).alias('est_scenario_actuel')
+            ])
+
+        scenarios_btinf = (
+            scenarios_btinf
             .filter(
                 # Garder soit les scénarios valides, soit le scénario actuel
                 (pl.col('puissance_souscrite_kva') >= pl.col('pmax_estimee_kva')) |
