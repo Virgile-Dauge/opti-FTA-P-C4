@@ -148,8 +148,8 @@ def _():
 
 
 @app.cell(hide_code=True)
-def _(file_upload):
-    # Chargement des données brutes
+def _(enrichir_dataframe, file_upload, plages_hc):
+    # Chargement, filtrage et enrichissement en une seule opération (optimisation mémoire WASM)
     mo.stop(not file_upload.value, mo.md("⚠️ Veuillez uploader un fichier CSV pour commencer l'analyse"))
 
     csv_content = file_upload.contents()
@@ -161,8 +161,8 @@ def _(file_upload):
 
     mo.stop(colonnes_manquantes, mo.md(f"❌ Colonnes manquantes : {', '.join(colonnes_manquantes)}"))
 
-    # Filtrer PA et convertir uniquement les données de base
-    cdc_brut = (
+    # Filtrer PA et convertir
+    _cdc_brut = (
         _cdc_tmp
         .filter(pl.col('Grandeur physique') == 'PA')
         .with_columns([
@@ -172,38 +172,58 @@ def _(file_upload):
         .select(['Horodate', 'Valeur', 'Pas', 'Identifiant PRM'])
     )
 
-    mo.stop(cdc_brut.is_empty(), mo.md("❌ Aucune donnée de Puissance Active (PA) trouvée"))
+    mo.stop(_cdc_brut.is_empty(), mo.md("❌ Aucune donnée de Puissance Active (PA) trouvée"))
 
-    mo.md(f"""
-    ✅ **Données brutes chargées**
+    # Enrichissement immédiat avec cadrans (pas de copie intermédiaire)
+    cdc = enrichir_dataframe(_cdc_brut, plages_hc)
 
-    - Nombre de mesures : {len(cdc_brut):,}
-    - Période : {cdc_brut['Horodate'].min()} → {cdc_brut['Horodate'].max()}
-    - Puissance max : {cdc_brut['Valeur'].max():.2f} kW
-    """)
-    return (cdc_brut,)
+    # Statistiques pour affichage
+    duree_jours = (cdc['Horodate'].max() - cdc['Horodate'].min()).days
+    warning_jours = f"\n⚠️ Seulement {duree_jours} jours de données (recommandé : 365 jours)" if duree_jours < 365 else ""
 
+    pas_exemple = cdc['Pas'][0]
+    pas_uniques = cdc['Pas'].n_unique()
+    warning_pas = f"\n⚠️ Attention : {pas_uniques} pas de temps différents détectés" if pas_uniques > 1 else ""
 
-@app.cell(hide_code=True)
-def _(cdc_brut):
-    # Affichage des PRMs
-    _prms = cdc_brut['Identifiant PRM'].unique().sort()
+    # PRMs
+    _prms = cdc['Identifiant PRM'].unique().sort()
     _nb_prms = len(_prms)
 
     if _nb_prms == 1:
-        _msg = mo.md(f"ℹ️ **PRM identifié** : `{_prms[0]}`")
+        prm_info = f"ℹ️ **PRM identifié** : `{_prms[0]}`"
     else:
-        _prms_list = '\n'.join([f"- `{prm}`" for prm in _prms])
-        _msg = mo.md(f"""
-            ⚠️ **Attention : {_nb_prms} PRMs détectés dans le fichier**
+        _prms_list = '\n'.join([f"     - `{prm}`" for prm in _prms])
+        prm_info = f"""⚠️ **Attention : {_nb_prms} PRMs détectés**
 
-            {_prms_list}
+    {_prms_list}
 
-            Les analyses portent sur l'ensemble des données. Si vous souhaitez analyser un seul PRM,
-            merci de filtrer le fichier CSV en amont.
-        """)
-    _msg
-    return
+    Les analyses portent sur l'ensemble des données."""
+
+    # Statistiques par cadran
+    _stats_cadrans = cdc.group_by('cadran').agg([
+        pl.col('volume').sum().alias('volume_total')
+    ]).sort('cadran')
+
+    _cadrans_str = "\n".join([
+        f"     - {row['cadran']} : {row['volume_total']:.0f} kWh"
+        for row in _stats_cadrans.iter_rows(named=True)
+    ])
+
+    mo.md(f"""
+    ✅ **Données chargées et enrichies**
+
+    - Nombre de mesures : {len(cdc):,}
+    - Période : {cdc['Horodate'].min()} → {cdc['Horodate'].max()}
+    - Puissance max : {cdc['Valeur'].max():.2f} kW
+    - Pas de temps : {pas_exemple}{warning_pas}
+
+    {prm_info}
+
+    **Consommation par cadran tarifaire :**
+    {_cadrans_str}
+    {warning_jours}
+    """)
+    return (cdc,)
 
 
 @app.cell(hide_code=True)
@@ -321,41 +341,6 @@ def fonctions_enrichissement():
             ])
         )
     return (enrichir_dataframe,)
-
-
-@app.cell(hide_code=True)
-def _(cdc_brut, enrichir_dataframe, plages_hc):
-    # Enrichissement des données avec cadrans tarifaires
-    cdc = enrichir_dataframe(cdc_brut, plages_hc)
-
-    duree_jours = (cdc['Horodate'].max() - cdc['Horodate'].min()).days
-    warning = f"\n⚠️ Seulement {duree_jours} jours de données (recommandé : 365 jours)" if duree_jours < 365 else ""
-
-    # Extraire le pas de temps
-    pas_exemple = cdc['Pas'][0]
-    pas_uniques = cdc['Pas'].n_unique()
-    warning_pas = f"\n⚠️ Attention : {pas_uniques} pas de temps différents détectés" if pas_uniques > 1 else ""
-
-    # Statistiques par cadran
-    _stats_cadrans = cdc.group_by('cadran').agg([
-        pl.col('volume').sum().alias('volume_total')
-    ]).sort('cadran')
-
-    _cadrans_str = "\n".join([
-        f"     - {row['cadran']} : {row['volume_total']:.0f} kWh"
-        for row in _stats_cadrans.iter_rows(named=True)
-    ])
-
-    mo.md(f"""
-        ✅ **Données enrichies avec succès**
-
-        - Pas de temps : {pas_exemple}{warning_pas}
-
-        **Consommation par cadran tarifaire :**
-        {_cadrans_str}
-        {warning}
-    """)
-    return (cdc,)
 
 
 @app.cell
