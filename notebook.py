@@ -1058,8 +1058,8 @@ def _(cout_actuel, resultats):
     idx_opt_graph = df_plot['turpe_total_eur'].arg_min()
     optimum_graph = df_plot[idx_opt_graph]
 
-    # Exclure les colonnes de dates (Altair ne supporte pas les timezones non-UTC)
-    colonnes_sans_dates = [col for col in df_plot.columns if col not in ['debut', 'fin', 'date_debut', 'date_fin']]
+    # Exclure les colonnes de dates et est_scenario_actuel (Altair ne supporte pas les timezones non-UTC)
+    colonnes_sans_dates = [col for col in df_plot.columns if col not in ['debut', 'fin', 'date_debut', 'date_fin', 'est_scenario_actuel']]
     df_plot_clean = df_plot.select(colonnes_sans_dates)
 
     # Préparer les marqueurs
