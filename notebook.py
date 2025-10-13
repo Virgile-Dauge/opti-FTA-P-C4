@@ -229,16 +229,9 @@ def _():
 def _(expr_cadran, expr_pas_heures, expr_volume, file_upload, plages_hc):
     mo.stop(not file_upload.value, mo.md("⚠️ Veuillez uploader un fichier CSV"))
 
-    # Écrire le CSV dans un fichier temporaire pour scan_csv
-    import tempfile
-    csv_content = file_upload.contents()
-    _temp_csv = tempfile.NamedTemporaryFile(mode='wb', suffix='.csv', delete=False)
-    _temp_csv.write(csv_content)
-    _temp_csv.close()
-
-    # Pipeline LAZY complet - AUCUN collect()
-    cdc_lazy = (
-        pl.scan_csv(_temp_csv.name, separator=';')
+    # Pipeline EAGER - lecture directe depuis mémoire
+    cdc = (
+        pl.read_csv(io.BytesIO(file_upload.contents()), separator=';')
         .filter(pl.col('Grandeur physique') == 'PA')
         .with_columns([
             pl.col('Horodate').str.strptime(pl.Datetime, '%Y-%m-%d %H:%M:%S'),
@@ -253,7 +246,7 @@ def _(expr_cadran, expr_pas_heures, expr_volume, file_upload, plages_hc):
         ])
         .select(['Valeur', 'pas_heures', 'cadran', 'Horodate', 'Identifiant PRM', 'volume'])
     )
-    return (cdc_lazy,)
+    return (cdc,)
 
 
 @app.cell(hide_code=True)
@@ -352,8 +345,8 @@ def fonctions_enrichissement():
 
 
 @app.cell
-def _(cdc_lazy):
-    cdc_lazy.collect()
+def _(cdc):
+    cdc
     return
 
 
@@ -364,28 +357,26 @@ def _():
 
 
 @app.cell(hide_code=True)
-def _(cdc_lazy):
+def _(cdc):
     # Étape 1: Calculer les dates globales par PDL (AVANT le pivot)
     dates_pdl = (
-        cdc_lazy
+        cdc
         .group_by('Identifiant PRM')
         .agg([
             pl.col('Horodate').min().alias('date_debut'),
             pl.col('Horodate').max().alias('date_fin'),
             pl.col('Valeur').max().alias('pmax_moyenne_kva'),
         ])
-        .collect()
     )
 
     # Étape 2: Agrégation des énergies et pmax par PDL et cadran
     energies_par_cadran = (
-        cdc_lazy
+        cdc
         .group_by(['Identifiant PRM', 'cadran'])
         .agg([
             pl.col('volume').sum().alias('energie_kwh'),
             pl.col('Valeur').max().alias('pmax_cadran_kva'),
         ])
-        .collect()
     )
 
     # Étape 3a: Pivot des énergies
@@ -569,7 +560,7 @@ def generer_scenarios_reduction_proportionnelle(
 
 @app.cell(hide_code=True)
 def _(
-    cdc_lazy,
+    cdc,
     consos_agregees,
     fta_actuel,
     puissance_actuelle_hcb,
@@ -580,8 +571,8 @@ def _(
 ):
     # Génération du scénario actuel pour comparaison
 
-    # Collecter cdc pour le calcul de dépassement
-    _cdc_actuel = cdc_lazy.select(['Valeur', 'pas_heures', 'cadran']).collect()
+    # Sélectionner les colonnes nécessaires pour le calcul de dépassement
+    _cdc_actuel = cdc.select(['Valeur', 'pas_heures', 'cadran'])
 
     # Récupérer les énergies depuis consos_agregees (1 ligne par PDL)
     _row_actuel = consos_agregees[0]
@@ -677,7 +668,7 @@ def _():
 
 @app.cell(hide_code=True)
 def _(
-    cdc_lazy,
+    cdc,
     consos_agregees,
     fta_actuel,
     plage_puissance,
@@ -691,9 +682,8 @@ def _(
 
     P_min, P_max = plage_puissance.value
 
-    # OPTIMISATION : Collect cdc_lazy UNE SEULE FOIS pour tous les calculs de dépassement
-    # Sélectionner uniquement les 3 colonnes nécessaires avant collect
-    cdc = cdc_lazy.select(['Valeur', 'pas_heures', 'cadran']).collect()
+    # Sélectionner uniquement les 3 colonnes nécessaires pour les calculs de dépassement
+    cdc_subset = cdc.select(['Valeur', 'pas_heures', 'cadran'])
 
     # Mode multi-cadrans: réduction proportionnelle simultanée
 
@@ -756,7 +746,7 @@ def _(
                 pl.struct(['puissance_hph_kva', 'puissance_hch_kva', 'puissance_hpb_kva', 'puissance_hcb_kva'])
                 .map_elements(
                     lambda row: calculer_duree_depassement_par_cadran(
-                        cdc,
+                        cdc_subset,
                         row['puissance_hph_kva'],
                         row['puissance_hch_kva'],
                         row['puissance_hpb_kva'],
@@ -791,7 +781,7 @@ def _(
         pl.struct(['puissance_hph_kva', 'puissance_hch_kva', 'puissance_hpb_kva', 'puissance_hcb_kva'])
         .map_elements(
             lambda row: calculer_duree_depassement_par_cadran(
-                cdc,
+                cdc_subset,
                 row['puissance_hph_kva'],
                 row['puissance_hch_kva'],
                 row['puissance_hpb_kva'],
