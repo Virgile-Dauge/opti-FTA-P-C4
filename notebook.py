@@ -359,7 +359,7 @@ def _():
 @app.cell(hide_code=True)
 def _(cdc):
     # Étape 1: Calculer les dates globales par PDL (AVANT le pivot)
-    dates_pdl = (
+    _dates_pdl = (
         cdc
         .group_by('Identifiant PRM')
         .agg([
@@ -370,7 +370,7 @@ def _(cdc):
     )
 
     # Étape 2: Agrégation des énergies et pmax par PDL et cadran
-    energies_par_cadran = (
+    _energies_par_cadran = (
         cdc
         .group_by(['Identifiant PRM', 'cadran'])
         .agg([
@@ -380,14 +380,14 @@ def _(cdc):
     )
 
     # Étape 3a: Pivot des énergies
-    energies_pivot = energies_par_cadran.pivot(
+    _energies_pivot = _energies_par_cadran.pivot(
         on='cadran',
         index='Identifiant PRM',
         values='energie_kwh',
     )
 
     # Étape 3b: Pivot des pmax par cadran
-    pmax_pivot = energies_par_cadran.pivot(
+    _pmax_pivot = _energies_par_cadran.pivot(
         on='cadran',
         index='Identifiant PRM',
         values='pmax_cadran_kva',
@@ -395,10 +395,10 @@ def _(cdc):
 
     # Étape 3c: Joindre tout
     consos_agregees = (
-        energies_pivot
-        .join(dates_pdl, on='Identifiant PRM', how='left')
+        _energies_pivot
+        .join(_dates_pdl, on='Identifiant PRM', how='left')
         .join(
-            pmax_pivot.rename({
+            _pmax_pivot.rename({
                 'HPH': 'pmax_hph_kva',
                 'HCH': 'pmax_hch_kva',
                 'HPB': 'pmax_hpb_kva',
@@ -680,22 +680,22 @@ def _(
 ):
     # Génération des scénarios multi-cadrans par réduction proportionnelle
 
-    P_min, P_max = plage_puissance.value
+    _P_min, _P_max = plage_puissance.value
 
     # Sélectionner uniquement les 3 colonnes nécessaires pour les calculs de dépassement
-    cdc_subset = cdc.select(['Valeur', 'pas_heures', 'cadran'])
+    _cdc_subset = cdc.select(['Valeur', 'pas_heures', 'cadran'])
 
     # Mode multi-cadrans: réduction proportionnelle simultanée
 
     # Étape 1: Scénarios BTINF mono-puissance (< 36 kVA) si nécessaire
-    scenarios_btinf = None
-    if P_min < 36:
-        puissances_btinf = list(range(P_min, min(36, P_max + 1)))
+    _scenarios_btinf = None
+    if _P_min < 36:
+        _puissances_btinf = list(range(_P_min, min(36, _P_max + 1)))
 
         # Identifier le scénario actuel si c'est BTINF
         _is_btinf_actuel = fta_actuel.value in ['BTINFCU4', 'BTINFMU4', 'BTINFLU']
 
-        scenarios_btinf = (
+        _scenarios_btinf = (
             consos_agregees
             .select(['pdl', 'energie_hph_kwh', 'energie_hch_kwh',
                      'energie_hpb_kwh', 'energie_hcb_kwh', 'pmax_estimee_kva'])
@@ -703,7 +703,7 @@ def _(
                 pl.lit(datetime(2025, 8, 1)).dt.replace_time_zone('Europe/Paris').alias('date_debut'),
                 pl.lit(datetime(2026, 7, 31)).dt.replace_time_zone('Europe/Paris').alias('date_fin'),
                 pl.lit(365).alias('nb_jours'),
-                pl.lit(puissances_btinf).alias('puissance_souscrite_kva')
+                pl.lit(_puissances_btinf).alias('puissance_souscrite_kva')
             ])
             .explode('puissance_souscrite_kva')
             .with_columns([
@@ -716,19 +716,19 @@ def _(
         if _is_btinf_actuel:
             _puissance_actuel = float(puissance_actuelle_mono.value)
             _fta_actuel = fta_actuel.value
-            scenarios_btinf = scenarios_btinf.with_columns([
+            _scenarios_btinf = _scenarios_btinf.with_columns([
                 (
                     (pl.col('puissance_souscrite_kva') == _puissance_actuel) &
                     (pl.col('formule_tarifaire_acheminement') == _fta_actuel)
                 ).alias('est_scenario_actuel')
             ])
         else:
-            scenarios_btinf = scenarios_btinf.with_columns([
+            _scenarios_btinf = _scenarios_btinf.with_columns([
                 pl.lit(False).alias('est_scenario_actuel')
             ])
 
-        scenarios_btinf = (
-            scenarios_btinf
+        _scenarios_btinf = (
+            _scenarios_btinf
             .filter(
                 # Garder soit les scénarios valides, soit le scénario actuel
                 (pl.col('puissance_souscrite_kva') >= pl.col('pmax_estimee_kva')) |
@@ -746,7 +746,7 @@ def _(
                 pl.struct(['puissance_hph_kva', 'puissance_hch_kva', 'puissance_hpb_kva', 'puissance_hcb_kva'])
                 .map_elements(
                     lambda row: calculer_duree_depassement_par_cadran(
-                        cdc_subset,
+                        _cdc_subset,
                         row['puissance_hph_kva'],
                         row['puissance_hch_kva'],
                         row['puissance_hpb_kva'],
@@ -771,17 +771,17 @@ def _(
             'p_hcb': float(puissance_actuelle_hcb.value),
         }
 
-    scenarios_btsup = generer_scenarios_reduction_proportionnelle(
+    _scenarios_btsup = generer_scenarios_reduction_proportionnelle(
         consos_agregees,
         config_actuelle=_config_actuelle_btsup
     )
 
     # Calculer dépassements pour BTSUP
-    scenarios_btsup = scenarios_btsup.with_columns([
+    _scenarios_btsup = _scenarios_btsup.with_columns([
         pl.struct(['puissance_hph_kva', 'puissance_hch_kva', 'puissance_hpb_kva', 'puissance_hcb_kva'])
         .map_elements(
             lambda row: calculer_duree_depassement_par_cadran(
-                cdc_subset,
+                _cdc_subset,
                 row['puissance_hph_kva'],
                 row['puissance_hch_kva'],
                 row['puissance_hpb_kva'],
@@ -793,7 +793,7 @@ def _(
     ])
 
     # Harmoniser l'ordre des colonnes avant concat
-    colonnes_ordre = [
+    _colonnes_ordre = [
         'pdl', 'energie_hph_kwh', 'energie_hch_kwh', 'energie_hpb_kwh', 'energie_hcb_kwh',
         'date_debut', 'date_fin', 'nb_jours',
         'puissance_souscrite_kva', 'formule_tarifaire_acheminement', 'duree_depassement_h',
@@ -802,21 +802,21 @@ def _(
     ]
 
     # Ajouter pmax_estimee_kva si nécessaire pour BTINF
-    if 'pmax_estimee_kva' in scenarios_btsup.columns:
-        scenarios_btsup = scenarios_btsup.select(colonnes_ordre + ['pmax_estimee_kva'])
+    if 'pmax_estimee_kva' in _scenarios_btsup.columns:
+        _scenarios_btsup = _scenarios_btsup.select(_colonnes_ordre + ['pmax_estimee_kva'])
     else:
-        scenarios_btsup = scenarios_btsup.select(colonnes_ordre)
+        _scenarios_btsup = _scenarios_btsup.select(_colonnes_ordre)
 
     # Concaténer BTINF et BTSUP
-    if scenarios_btinf is not None:
-        colonnes_communes = [col for col in colonnes_ordre if col in scenarios_btinf.columns]
-        scenarios_btinf = scenarios_btinf.select(colonnes_communes)
-        scenarios_btsup = scenarios_btsup.select(colonnes_communes)
-        scenarios = pl.concat([scenarios_btinf, scenarios_btsup])
+    if _scenarios_btinf is not None:
+        _colonnes_communes = [col for col in _colonnes_ordre if col in _scenarios_btinf.columns]
+        _scenarios_btinf = _scenarios_btinf.select(_colonnes_communes)
+        _scenarios_btsup = _scenarios_btsup.select(_colonnes_communes)
+        scenarios = pl.concat([_scenarios_btinf, _scenarios_btsup])
     else:
-        scenarios = scenarios_btsup
+        scenarios = _scenarios_btsup
 
-    _nb_scenarios_btsup = len(scenarios_btsup)
+    _nb_scenarios_btsup = len(_scenarios_btsup)
     _info = f"Multi-cadrans réduction proportionnelle: {_nb_scenarios_btsup} scénarios BTSUP"
 
     _nb_scenarios = len(scenarios)
@@ -886,14 +886,14 @@ def _():
 @app.cell(hide_code=True)
 def _(scenario_actuel, scenarios):
     # Charger les règles TURPE une seule fois
-    regles_turpe = load_turpe_rules()
+    _regles_turpe = load_turpe_rules()
 
     # Concaténer scénario actuel avec les scénarios d'optimisation
-    tous_scenarios = pl.concat([scenario_actuel, scenarios])
+    _tous_scenarios = pl.concat([scenario_actuel, scenarios])
 
     # Calcul TURPE via electricore sur tous les scénarios
-    resultats_tous = (
-        tous_scenarios
+    _resultats_tous = (
+        _tous_scenarios
         .rename({
             'date_debut': 'debut',
             'date_fin': 'fin'
@@ -917,8 +917,8 @@ def _(scenario_actuel, scenarios):
             pl.col('puissance_hcb_kva').alias('puissance_souscrite_hcb_kva'),
         ])
         .lazy()
-        .pipe(ajouter_turpe_fixe, regles=regles_turpe)
-        .pipe(ajouter_turpe_variable, regles=regles_turpe)
+        .pipe(ajouter_turpe_fixe, regles=_regles_turpe)
+        .pipe(ajouter_turpe_variable, regles=_regles_turpe)
         .with_columns([
             (pl.col('turpe_fixe_eur') + pl.col('turpe_variable_eur')).alias('turpe_total_eur')
         ])
@@ -926,8 +926,8 @@ def _(scenario_actuel, scenarios):
     )
 
     # Séparer scénario actuel vs résultats d'optimisation
-    cout_actuel = resultats_tous.filter(pl.col('est_scenario_actuel') == True)
-    resultats = resultats_tous.filter(pl.col('est_scenario_actuel') == False)
+    cout_actuel = _resultats_tous.filter(pl.col('est_scenario_actuel') == True)
+    resultats = _resultats_tous.filter(pl.col('est_scenario_actuel') == False)
 
     _nb_resultats = len(resultats)
     _cout_min = resultats['turpe_total_eur'].min()
