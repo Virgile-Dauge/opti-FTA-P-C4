@@ -1,7 +1,7 @@
 import marimo
 
 __generated_with = "0.16.5"
-app = marimo.App(width="medium")
+app = marimo.App()
 
 async with app.setup(hide_code=True):
     # Initialization code that runs before all other cells
@@ -69,6 +69,12 @@ def _():
     )
     file_upload
     return (file_upload,)
+
+
+@app.cell
+def _(cdc):
+    cdc
+    return
 
 
 @app.cell(hide_code=True)
@@ -324,9 +330,16 @@ def _(
         ])
     )
 
-    # DataFrame minimal pour calculs de scénarios (seulement 3 colonnes)
-    cdc = _cdc_temp.select(['cadran', 'Identifiant PRM', 'pmax'])
-    return cdc, consos_agregees, pas_heures
+    # DataFrame ultra-optimisé : agrégation par combinaisons uniques de (PRM, cadran, pmax)
+    # Réduction ~99.7% en mémoire : de ~105k lignes à ~250 lignes par PDL
+    cdc = (
+        _cdc_temp
+        .group_by(['Identifiant PRM', 'cadran', 'pmax'])
+        .agg([
+            (pl.len() * pas_heures).alias('duree_h')
+        ])
+    )
+    return cdc, consos_agregees
 
 
 @app.cell(hide_code=True)
@@ -569,7 +582,6 @@ def _(
     cdc,
     consos_agregees,
     fta_actuel,
-    pas_heures,
     puissance_actuelle_hcb,
     puissance_actuelle_hch,
     puissance_actuelle_hpb,
@@ -628,7 +640,6 @@ def _(
     # Calculer dépassement
     _duree_depassement_actuel = calculer_duree_depassement_par_cadran(
         cdc,
-        pas_heures,
         _scenario_actuel_dict['puissance_hph_kva'],
         _scenario_actuel_dict['puissance_hch_kva'],
         _scenario_actuel_dict['puissance_hpb_kva'],
@@ -679,7 +690,6 @@ def _(
     cdc,
     consos_agregees,
     fta_actuel,
-    pas_heures,
     plage_puissance,
     puissance_actuelle_hcb,
     puissance_actuelle_hch,
@@ -753,7 +763,6 @@ def _(
                 .map_elements(
                     lambda row: calculer_duree_depassement_par_cadran(
                         cdc,
-                        pas_heures,
                         row['puissance_hph_kva'],
                         row['puissance_hch_kva'],
                         row['puissance_hpb_kva'],
@@ -789,7 +798,6 @@ def _(
         .map_elements(
             lambda row: calculer_duree_depassement_par_cadran(
                 cdc,
-                pas_heures,
                 row['puissance_hph_kva'],
                 row['puissance_hch_kva'],
                 row['puissance_hpb_kva'],
@@ -845,7 +853,6 @@ def _(
 # Fonction pour calculer la durée de dépassement par cadran
 def calculer_duree_depassement_par_cadran(
     cdc: pl.DataFrame,
-    pas_heures: float,
     puissance_hph_kva: float,
     puissance_hch_kva: float,
     puissance_hpb_kva: float,
@@ -855,28 +862,30 @@ def calculer_duree_depassement_par_cadran(
     Calcule la durée totale de dépassement en tenant compte des puissances par cadran.
 
     Args:
-        cdc: DataFrame avec colonnes 'pmax' (kVA), 'cadran'
-        pas_heures: Pas temporel en heures (constante, ex: 0.0833 pour 5min)
+        cdc: DataFrame agrégé avec colonnes 'pmax' (kVA), 'cadran', 'duree_h' (heures)
         puissance_hph_kva, puissance_hch_kva, puissance_hpb_kva, puissance_hcb_kva:
             Puissances souscrites par cadran (kVA)
 
     Returns:
         Durée totale de dépassement en heures (somme sur tous les cadrans)
     """
+    # Mapping cadran → seuil (plus élégant que when/then)
+    seuils_map = {
+        'HPH': puissance_hph_kva,
+        'HCH': puissance_hch_kva,
+        'HPB': puissance_hpb_kva,
+        'HCB': puissance_hcb_kva,
+    }
+
     return (
         cdc
         .with_columns([
-            # Mapper chaque cadran à sa puissance souscrite
-            pl.when(pl.col('cadran') == 'HPH').then(pl.lit(puissance_hph_kva))
-            .when(pl.col('cadran') == 'HCH').then(pl.lit(puissance_hch_kva))
-            .when(pl.col('cadran') == 'HPB').then(pl.lit(puissance_hpb_kva))
-            .when(pl.col('cadran') == 'HCB').then(pl.lit(puissance_hcb_kva))
-            .otherwise(pl.lit(puissance_hcb_kva))  # Défaut: utiliser la puissance max (HCB)
-            .alias('puissance_seuil')
+            pl.col('cadran').replace(seuils_map).cast(pl.Float64).alias('puissance_seuil')
         ])
         # Ne compter que les dépassements (pmax > seuil du cadran)
         .filter(pl.col('pmax') > pl.col('puissance_seuil'))
-        .select(pl.len() * pas_heures)
+        # Sommer directement les durées pré-agrégées
+        .select(pl.col('duree_h').sum())
         .item()
     )
 
