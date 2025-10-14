@@ -1,9 +1,9 @@
 import marimo
 
-__generated_with = "0.16.3"
+__generated_with = "0.16.5"
 app = marimo.App(width="medium")
 
-async with app.setup:
+async with app.setup(hide_code=True):
     # Initialization code that runs before all other cells
 
     # Installation des dépendances pour WASM (Pyodide)
@@ -14,7 +14,7 @@ async with app.setup:
         await micropip.install("pyarrow")
         await micropip.install("xlsxwriter")
         # electricore 1.2.0+ avec core minimal compatible WASM
-        await micropip.install("electricore==1.3.3", keep_going=True)
+        await micropip.install("electricore==1.3.4")
 
     # Imports standards
     import marimo as mo
@@ -154,7 +154,7 @@ def _():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _():
     # Dropdown FTA
     fta_actuel = mo.ui.dropdown(
@@ -226,11 +226,18 @@ def _():
 
 
 @app.cell(hide_code=True)
-def _(expr_cadran, expr_pas_heures, expr_volume, file_upload, plages_hc):
+def _(
+    expr_cadran,
+    expr_pas_heures,
+    expr_pmax,
+    expr_volume,
+    file_upload,
+    plages_hc,
+):
     mo.stop(not file_upload.value, mo.md("⚠️ Veuillez uploader un fichier CSV"))
 
-    # Pipeline EAGER - lecture directe depuis mémoire
-    cdc = (
+    # Pipeline EAGER - lecture directe depuis mémoire (temporaire avec toutes les colonnes)
+    _cdc_temp = (
         pl.read_csv(io.BytesIO(file_upload.contents()), separator=';')
         .filter(pl.col('Grandeur physique') == 'PA')
         .with_columns([
@@ -242,11 +249,84 @@ def _(expr_cadran, expr_pas_heures, expr_volume, file_upload, plages_hc):
         ])
         .with_columns([
             expr_volume().alias('volume'),
+            expr_pmax().alias('pmax'),
             expr_cadran(plages_hc).alias('cadran')
         ])
-        .select(['Valeur', 'pas_heures', 'cadran', 'Horodate', 'Identifiant PRM', 'volume'])
     )
-    return (cdc,)
+
+    # Extraire le pas en heures (constante)
+    pas_heures = _cdc_temp.select('pas_heures').limit(1).item()
+
+    # Calculer dates et pmax_moyenne par PDL
+    dates_et_pmax_par_pdl = (
+        _cdc_temp
+        .group_by('Identifiant PRM')
+        .agg([
+            pl.col('Horodate').min().alias('date_debut'),
+            pl.col('Horodate').max().alias('date_fin'),
+            pl.col('pmax').max().alias('pmax_moyenne_kva'),
+        ])
+    )
+
+    # Agrégation des énergies et pmax par PDL et cadran
+    _energies_par_cadran = (
+        _cdc_temp
+        .group_by(['Identifiant PRM', 'cadran'])
+        .agg([
+            pl.col('volume').sum().alias('energie_kwh'),
+            pl.col('pmax').max().alias('pmax_cadran_kva'),
+        ])
+    )
+
+    # Pivots
+    _energies_pivot = _energies_par_cadran.pivot(
+        on='cadran',
+        index='Identifiant PRM',
+        values='energie_kwh',
+    )
+
+    _pmax_pivot = _energies_par_cadran.pivot(
+        on='cadran',
+        index='Identifiant PRM',
+        values='pmax_cadran_kva',
+    )
+
+    # Joindre tout
+    consos_agregees = (
+        _energies_pivot
+        .join(dates_et_pmax_par_pdl, on='Identifiant PRM', how='left')
+        .join(
+            _pmax_pivot.rename({
+                'HPH': 'pmax_hph_kva',
+                'HCH': 'pmax_hch_kva',
+                'HPB': 'pmax_hpb_kva',
+                'HCB': 'pmax_hcb_kva',
+            }),
+            on='Identifiant PRM',
+            how='left'
+        )
+        # Renommer pour format electricore
+        .rename({
+            'Identifiant PRM': 'pdl',
+            'HPH': 'energie_hph_kwh',
+            'HCH': 'energie_hch_kwh',
+            'HPB': 'energie_hpb_kwh',
+            'HCB': 'energie_hcb_kwh',
+        })
+        # Remplir les valeurs manquantes par 0 (si un cadran n'existe pas)
+        .with_columns([
+            # Calculer le nombre de jours de la période
+            (pl.col('date_fin') - pl.col('date_debut')).dt.total_days().alias('nb_jours'),
+            pl.col('energie_hph_kwh').fill_null(0).floor(),
+            pl.col('energie_hch_kwh').fill_null(0).floor(),
+            pl.col('energie_hpb_kwh').fill_null(0).floor(),
+            pl.col('energie_hcb_kwh').fill_null(0).floor(),
+        ])
+    )
+
+    # DataFrame minimal pour calculs de scénarios (seulement 3 colonnes)
+    cdc = _cdc_temp.select(['cadran', 'Identifiant PRM', 'pmax'])
+    return cdc, consos_agregees, pas_heures
 
 
 @app.cell(hide_code=True)
@@ -280,6 +360,17 @@ def fonctions_enrichissement():
             Expression Polars du volume en kWh
         """
         return pl.col('Valeur') * pl.col('pas_heures')
+
+    def expr_pmax() -> pl.Expr:
+        """
+        Expression Polars pour estimer la Pmax en kVA.
+
+        volume = Valeur (kW) × coef
+
+        Returns:
+            Expression Polars du volume en kWh
+        """
+        return (pl.col('Valeur') * 1.10).round(3)
 
     def expr_saison() -> pl.Expr:
         """
@@ -341,98 +432,11 @@ def fonctions_enrichissement():
             Expression Polars retournant le cadran (ex: 'HPH', 'HCB')
         """
         return expr_horaire(plages) + expr_saison()
-    return expr_cadran, expr_pas_heures, expr_volume
-
-
-@app.cell
-def _(cdc):
-    cdc
-    return
-
-
-@app.cell
-def _():
-    mo.md(r"""## 🔄 Agrégation par PDL et pivotage des cadrans""")
-    return
+    return expr_cadran, expr_pas_heures, expr_pmax, expr_volume
 
 
 @app.cell(hide_code=True)
-def _(cdc):
-    # Étape 1: Calculer les dates globales par PDL (AVANT le pivot)
-    _dates_pdl = (
-        cdc
-        .group_by('Identifiant PRM')
-        .agg([
-            pl.col('Horodate').min().alias('date_debut'),
-            pl.col('Horodate').max().alias('date_fin'),
-            pl.col('Valeur').max().alias('pmax_moyenne_kva'),
-        ])
-    )
-
-    # Étape 2: Agrégation des énergies et pmax par PDL et cadran
-    _energies_par_cadran = (
-        cdc
-        .group_by(['Identifiant PRM', 'cadran'])
-        .agg([
-            pl.col('volume').sum().alias('energie_kwh'),
-            pl.col('Valeur').max().alias('pmax_cadran_kva'),
-        ])
-    )
-
-    # Étape 3a: Pivot des énergies
-    _energies_pivot = _energies_par_cadran.pivot(
-        on='cadran',
-        index='Identifiant PRM',
-        values='energie_kwh',
-    )
-
-    # Étape 3b: Pivot des pmax par cadran
-    _pmax_pivot = _energies_par_cadran.pivot(
-        on='cadran',
-        index='Identifiant PRM',
-        values='pmax_cadran_kva',
-    )
-
-    # Étape 3c: Joindre tout
-    consos_agregees = (
-        _energies_pivot
-        .join(_dates_pdl, on='Identifiant PRM', how='left')
-        .join(
-            _pmax_pivot.rename({
-                'HPH': 'pmax_hph_kva',
-                'HCH': 'pmax_hch_kva',
-                'HPB': 'pmax_hpb_kva',
-                'HCB': 'pmax_hcb_kva',
-            }),
-            on='Identifiant PRM',
-            how='left'
-        )
-        # Renommer pour format electricore
-        .rename({
-            'Identifiant PRM': 'pdl',
-            'HPH': 'energie_hph_kwh',
-            'HCH': 'energie_hch_kwh',
-            'HPB': 'energie_hpb_kwh',
-            'HCB': 'energie_hcb_kwh',
-        })
-        # Remplir les valeurs manquantes par 0 (si un cadran n'existe pas)
-        .with_columns([
-            # Calculer le nombre de jours de la période
-            (pl.col('date_fin') - pl.col('date_debut')).dt.total_days().alias('nb_jours'),
-            pl.col('energie_hph_kwh').fill_null(0).floor(),
-            pl.col('energie_hch_kwh').fill_null(0).floor(),
-            pl.col('energie_hpb_kwh').fill_null(0).floor(),
-            pl.col('energie_hcb_kwh').fill_null(0).floor(),
-            # Estimation pmax globale à partir de la puissance moyenne sur 5 min (heuristique × 1.15)
-            (pl.col('pmax_moyenne_kva') * 1.15).alias('pmax_estimee_kva'),
-            # Estimation pmax par cadran avec même heuristique
-            (pl.col('pmax_hph_kva') * 1.15).fill_null(0).alias('pmax_hph_estimee_kva'),
-            (pl.col('pmax_hch_kva') * 1.15).fill_null(0).alias('pmax_hch_estimee_kva'),
-            (pl.col('pmax_hpb_kva') * 1.15).fill_null(0).alias('pmax_hpb_estimee_kva'),
-            (pl.col('pmax_hcb_kva') * 1.15).fill_null(0).alias('pmax_hcb_estimee_kva'),
-        ])
-    )
-
+def _(consos_agregees):
     _nb_pdl = len(consos_agregees)
     _energie_totale = (
         consos_agregees['energie_hph_kwh'].sum() +
@@ -442,12 +446,14 @@ def _(cdc):
     )
 
     mo.md(f"""
+    ## 🔄 Agrégation par PDL et pivotage des cadrans
+
     ✅ **Agrégation terminée**
 
     - Nombre de PDL : {_nb_pdl}
     - Énergie totale : {_energie_totale:,.0f} kWh
     """)
-    return (consos_agregees,)
+    return
 
 
 @app.cell
@@ -488,11 +494,11 @@ def generer_scenarios_reduction_proportionnelle(
     scenarios_list = []
 
     for row in consos_agregees.iter_rows(named=True):
-        # Étape 1 : Calculer les puissances de base (pmax × 1.15)
-        p_hph_base = int(ceil(row['pmax_hph_estimee_kva']))
-        p_hch_base = int(ceil(row['pmax_hch_estimee_kva']))
-        p_hpb_base = int(ceil(row['pmax_hpb_estimee_kva']))
-        p_hcb_base = int(ceil(row['pmax_hcb_estimee_kva']))
+        # Étape 1 : Calculer les puissances de base
+        p_hph_base = int(ceil(row['pmax_hph_kva']))
+        p_hch_base = int(ceil(row['pmax_hch_kva']))
+        p_hpb_base = int(ceil(row['pmax_hpb_kva']))
+        p_hcb_base = int(ceil(row['pmax_hcb_kva']))
 
         # Étape 2 : Forcer la contrainte d'ordre (cascade)
         p_hph_initial = max(36, p_hph_base)
@@ -563,6 +569,7 @@ def _(
     cdc,
     consos_agregees,
     fta_actuel,
+    pas_heures,
     puissance_actuelle_hcb,
     puissance_actuelle_hch,
     puissance_actuelle_hpb,
@@ -572,7 +579,7 @@ def _(
     # Génération du scénario actuel pour comparaison
 
     # Sélectionner les colonnes nécessaires pour le calcul de dépassement
-    _cdc_actuel = cdc.select(['Valeur', 'pas_heures', 'cadran'])
+    #_cdc_actuel = cdc.select(['Valeur', 'pas_heures', 'cadran'])
 
     # Récupérer les énergies depuis consos_agregees (1 ligne par PDL)
     _row_actuel = consos_agregees[0]
@@ -620,7 +627,8 @@ def _(
 
     # Calculer dépassement
     _duree_depassement_actuel = calculer_duree_depassement_par_cadran(
-        _cdc_actuel,
+        cdc,
+        pas_heures,
         _scenario_actuel_dict['puissance_hph_kva'],
         _scenario_actuel_dict['puissance_hch_kva'],
         _scenario_actuel_dict['puissance_hpb_kva'],
@@ -671,6 +679,7 @@ def _(
     cdc,
     consos_agregees,
     fta_actuel,
+    pas_heures,
     plage_puissance,
     puissance_actuelle_hcb,
     puissance_actuelle_hch,
@@ -681,9 +690,6 @@ def _(
     # Génération des scénarios multi-cadrans par réduction proportionnelle
 
     _P_min, _P_max = plage_puissance.value
-
-    # Sélectionner uniquement les 3 colonnes nécessaires pour les calculs de dépassement
-    _cdc_subset = cdc.select(['Valeur', 'pas_heures', 'cadran'])
 
     # Mode multi-cadrans: réduction proportionnelle simultanée
 
@@ -698,7 +704,7 @@ def _(
         _scenarios_btinf = (
             consos_agregees
             .select(['pdl', 'energie_hph_kwh', 'energie_hch_kwh',
-                     'energie_hpb_kwh', 'energie_hcb_kwh', 'pmax_estimee_kva'])
+                     'energie_hpb_kwh', 'energie_hcb_kwh', 'pmax_moyenne_kva'])
             .with_columns([
                 pl.lit(datetime(2025, 8, 1)).dt.replace_time_zone('Europe/Paris').alias('date_debut'),
                 pl.lit(datetime(2026, 7, 31)).dt.replace_time_zone('Europe/Paris').alias('date_fin'),
@@ -731,7 +737,7 @@ def _(
             _scenarios_btinf
             .filter(
                 # Garder soit les scénarios valides, soit le scénario actuel
-                (pl.col('puissance_souscrite_kva') >= pl.col('pmax_estimee_kva')) |
+                (pl.col('puissance_souscrite_kva') >= pl.col('pmax_moyenne_kva')) |
                 pl.col('est_scenario_actuel')
             )
             .with_columns([
@@ -746,7 +752,8 @@ def _(
                 pl.struct(['puissance_hph_kva', 'puissance_hch_kva', 'puissance_hpb_kva', 'puissance_hcb_kva'])
                 .map_elements(
                     lambda row: calculer_duree_depassement_par_cadran(
-                        _cdc_subset,
+                        cdc,
+                        pas_heures,
                         row['puissance_hph_kva'],
                         row['puissance_hch_kva'],
                         row['puissance_hpb_kva'],
@@ -781,7 +788,8 @@ def _(
         pl.struct(['puissance_hph_kva', 'puissance_hch_kva', 'puissance_hpb_kva', 'puissance_hcb_kva'])
         .map_elements(
             lambda row: calculer_duree_depassement_par_cadran(
-                _cdc_subset,
+                cdc,
+                pas_heures,
                 row['puissance_hph_kva'],
                 row['puissance_hch_kva'],
                 row['puissance_hpb_kva'],
@@ -801,9 +809,9 @@ def _(
         'est_scenario_actuel'
     ]
 
-    # Ajouter pmax_estimee_kva si nécessaire pour BTINF
-    if 'pmax_estimee_kva' in _scenarios_btsup.columns:
-        _scenarios_btsup = _scenarios_btsup.select(_colonnes_ordre + ['pmax_estimee_kva'])
+    # Ajouter pmax_moyenne_kva si nécessaire pour BTINF
+    if 'pmax_moyenne_kva' in _scenarios_btsup.columns:
+        _scenarios_btsup = _scenarios_btsup.select(_colonnes_ordre + ['pmax_moyenne_kva'])
     else:
         _scenarios_btsup = _scenarios_btsup.select(_colonnes_ordre)
 
@@ -837,6 +845,7 @@ def _(
 # Fonction pour calculer la durée de dépassement par cadran
 def calculer_duree_depassement_par_cadran(
     cdc: pl.DataFrame,
+    pas_heures: float,
     puissance_hph_kva: float,
     puissance_hch_kva: float,
     puissance_hpb_kva: float,
@@ -846,7 +855,8 @@ def calculer_duree_depassement_par_cadran(
     Calcule la durée totale de dépassement en tenant compte des puissances par cadran.
 
     Args:
-        cdc: DataFrame avec colonnes 'Valeur' (kW), 'pas_heures', 'cadran'
+        cdc: DataFrame avec colonnes 'pmax' (kVA), 'cadran'
+        pas_heures: Pas temporel en heures (constante, ex: 0.0833 pour 5min)
         puissance_hph_kva, puissance_hch_kva, puissance_hpb_kva, puissance_hcb_kva:
             Puissances souscrites par cadran (kVA)
 
@@ -864,9 +874,9 @@ def calculer_duree_depassement_par_cadran(
             .otherwise(pl.lit(puissance_hcb_kva))  # Défaut: utiliser la puissance max (HCB)
             .alias('puissance_seuil')
         ])
-        # Ne compter que les dépassements (Valeur > seuil du cadran)
-        .filter(pl.col('Valeur') > pl.col('puissance_seuil'))
-        .select(pl.col('pas_heures').sum())
+        # Ne compter que les dépassements (pmax > seuil du cadran)
+        .filter(pl.col('pmax') > pl.col('puissance_seuil'))
+        .select(pl.len() * pas_heures)
         .item()
     )
 
@@ -886,13 +896,18 @@ def _():
 @app.cell(hide_code=True)
 def _(scenario_actuel, scenarios):
     # Charger les règles TURPE une seule fois
+    print(f"🔍 Chargement des règles TURPE...")
     _regles_turpe = load_turpe_rules()
+    print(f"✅ Règles TURPE chargées")
 
     # Concaténer scénario actuel avec les scénarios d'optimisation
+    print(f"🔍 Concatenation: {len(scenario_actuel)} + {len(scenarios)} scénarios")
     _tous_scenarios = pl.concat([scenario_actuel, scenarios])
+    print(f"✅ Total: {len(_tous_scenarios)} scénarios")
 
     # Calcul TURPE via electricore sur tous les scénarios
-    _resultats_tous = (
+    print(f"🔍 Préparation des données...")
+    _prepared = (
         _tous_scenarios
         .rename({
             'date_debut': 'debut',
@@ -917,13 +932,50 @@ def _(scenario_actuel, scenarios):
             pl.col('puissance_hcb_kva').alias('puissance_souscrite_hcb_kva'),
         ])
         .lazy()
-        .pipe(ajouter_turpe_fixe, regles=_regles_turpe)
-        .pipe(ajouter_turpe_variable, regles=_regles_turpe)
+    )
+    print(f"✅ Données préparées")
+
+    print(f"🔍 Calcul TURPE fixe...")
+    if "pyodide" in sys.modules:
+        print(f"   (Mode WASM - ceci peut échouer avec 'Cannot allocate memory')")
+    _with_fixe = _prepared.pipe(ajouter_turpe_fixe, regles=_regles_turpe)
+    print(f"✅ TURPE fixe calculé")
+
+    print(f"🔍 Calcul TURPE variable...")
+    _with_variable = _with_fixe.pipe(ajouter_turpe_variable, regles=_regles_turpe)
+    print(f"✅ TURPE variable calculé")
+
+    print(f"🔍 Calcul total et collect()...")
+
+    import gc
+    gc.collect()
+    _resultats_tous = (
+        _with_variable
         .with_columns([
             (pl.col('turpe_fixe_eur') + pl.col('turpe_variable_eur')).alias('turpe_total_eur')
         ])
+        # Optimisation WASM : convertir en Categorical APRÈS les calculs (évite problème de merge)
+        .with_columns([
+            pl.col('pdl').cast(pl.String).cast(pl.Categorical),
+            pl.col('formule_tarifaire_acheminement').cast(pl.Categorical)
+        ])
+        # Sélectionner uniquement les colonnes nécessaires pour réduire la mémoire
+        .select([
+            'pdl',
+            'formule_tarifaire_acheminement',
+            'puissance_souscrite_kva',
+            'puissance_hph_kva',
+            'puissance_hch_kva',
+            'puissance_hpb_kva',
+            'puissance_hcb_kva',
+            'turpe_fixe_eur',
+            'turpe_variable_eur',
+            'turpe_total_eur',
+            'est_scenario_actuel'
+        ])
         .collect()
     )
+    print(f"✅ Collect terminé")
 
     # Séparer scénario actuel vs résultats d'optimisation
     cout_actuel = _resultats_tous.filter(pl.col('est_scenario_actuel') == True)
