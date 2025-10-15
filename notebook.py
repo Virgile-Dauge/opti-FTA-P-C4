@@ -1239,43 +1239,18 @@ def _():
 @app.cell(hide_code=True)
 def _(cdc):
     # Courbe de monotone (load duration curve) par cadran
-
-    # Préparer les données : trier par puissance décroissante et calculer durée cumulée
-    df_monotone = (
+    # Utilise directement la colonne duree_depassement_h calculée dans cdc
+    df_monotone_final = (
         cdc
-        .sort('pmax', descending=True)
-        .group_by('cadran')
-        .agg([
-            pl.col('pmax').alias('pmax_list'),
-            pl.col('duree_h').alias('duree_list')
-        ])
+        .select(['cadran', 'pmax', 'duree_depassement_h'])
+        .rename({'duree_depassement_h': 'duree_cumulee_h'})
+        .to_pandas()
     )
-
-    # Créer une liste de dataframes par cadran avec durée cumulée
-    monotone_data = []
-    for row in df_monotone.iter_rows(named=True):
-        cadran = row['cadran']
-        pmax_vals = row['pmax_list']
-        duree_vals = row['duree_list']
-
-        # Trier par pmax décroissant
-        sorted_indices = sorted(range(len(pmax_vals)), key=lambda i: pmax_vals[i], reverse=True)
-
-        duree_cumul = 0
-        for idx in sorted_indices:
-            duree_cumul += duree_vals[idx]
-            monotone_data.append({
-                'cadran': cadran,
-                'pmax': pmax_vals[idx],
-                'duree_cumulee_h': duree_cumul
-            })
-
-    df_monotone_final = pl.DataFrame(monotone_data).to_pandas()
 
     # Graphique de monotone
     monotone_chart = alt.Chart(df_monotone_final).mark_line(point=False).encode(
         x=alt.X('duree_cumulee_h:Q',
-                title='Durée cumulée (heures/an)',
+                title='Durée de dépassement (heures/an)',
                 scale=alt.Scale(zero=True)),
         y=alt.Y('pmax:Q',
                 title='Puissance (kVA)',
@@ -1289,7 +1264,7 @@ def _(cdc):
         tooltip=[
             alt.Tooltip('cadran:N', title='Cadran'),
             alt.Tooltip('pmax:Q', title='Puissance (kVA)', format='.1f'),
-            alt.Tooltip('duree_cumulee_h:Q', title='Durée cumulée (h)', format=',.0f')
+            alt.Tooltip('duree_cumulee_h:Q', title='Heures de dépassement', format=',.0f')
         ]
     ).properties(
         width=800,
@@ -1370,6 +1345,83 @@ def _(cdc):
     """)
 
     mo.vstack([mo.ui.altair_chart(histo_chart), _note_histo])
+    return
+
+
+@app.cell
+def _():
+    mo.md(r"""### 🎯 Analyse interactive des dépassements par seuil""")
+    return
+
+
+@app.cell(hide_code=True)
+def _(cdc):
+    # Slider pour choisir un seuil de puissance
+    seuil_puissance = mo.ui.slider(
+        start=int(cdc['pmax'].min()),
+        stop=int(cdc['pmax'].max()),
+        value=40,
+        step=1,
+        label="Seuil de puissance souscrite (kVA)",
+        show_value=True
+    )
+    seuil_puissance
+    return (seuil_puissance,)
+
+
+@app.cell(hide_code=True)
+def _(cdc, seuil_puissance):
+    # Calculer les heures de dépassement pour le seuil choisi par cadran
+    _seuil = seuil_puissance.value
+
+    # Pour chaque cadran, trouver la durée de dépassement au seuil choisi
+    # On prend la valeur de duree_depassement_h pour la puissance la plus proche du seuil
+    depassements_par_cadran = (
+        cdc
+        .filter(pl.col('pmax') >= _seuil)
+        .group_by('cadran')
+        .agg([
+            pl.col('duree_depassement_h').max().alias('heures_depassement')
+        ])
+        .to_pandas()
+    )
+
+    # Graphique en barres
+    depassement_chart = alt.Chart(depassements_par_cadran).mark_bar().encode(
+        x=alt.X('cadran:N',
+                title='Cadran tarifaire',
+                sort=['HPH', 'HCH', 'HPB', 'HCB']),
+        y=alt.Y('heures_depassement:Q',
+                title='Heures de dépassement/an'),
+        color=alt.Color('cadran:N',
+                       title='Cadran',
+                       scale=alt.Scale(
+                           domain=['HPH', 'HCH', 'HPB', 'HCB'],
+                           range=['#e74c3c', '#e67e22', '#3498db', '#2ecc71']
+                       ),
+                       legend=None),
+        tooltip=[
+            alt.Tooltip('cadran:N', title='Cadran'),
+            alt.Tooltip('heures_depassement:Q', title='Heures/an', format=',.0f')
+        ]
+    ).properties(
+        width=600,
+        height=400,
+        title=f"Heures de dépassement pour un seuil de {_seuil} kVA"
+    )
+
+    # Calcul du total
+    _total_depassement = depassements_par_cadran['heures_depassement'].sum()
+
+    _note_depassement = mo.md(f"""
+    **Interprétation** :
+    - Pour une puissance souscrite de **{_seuil} kVA** dans chaque cadran
+    - **Total annuel** : {_total_depassement:,.0f} heures de dépassement
+    - Les dépassements entraînent des pénalités en tarif C4
+    - Ajustez le slider pour trouver le bon compromis coût fixe / pénalités
+    """)
+
+    mo.vstack([mo.ui.altair_chart(depassement_chart), _note_depassement])
     return
 
 
