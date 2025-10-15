@@ -524,13 +524,15 @@ def _():
 @app.function(hide_code=True)
 def generer_scenarios_reduction_proportionnelle(
     consos_agregees: pl.DataFrame,
+    cdc: pl.DataFrame,
+    seuil_depassement_h: float = 10.0,
     config_actuelle: dict = None
 ) -> pl.DataFrame:
     """
     Génère les scénarios multi-cadrans par réduction proportionnelle simultanée.
 
     Principe :
-    - Part de (pmax_hph, pmax_hch, pmax_hpb, pmax_hcb) × 1.15 arrondi
+    - Part de la puissance donnant ~seuil_depassement_h heures de dépassement pour chaque cadran
     - Applique la contrainte P_hph ≤ P_hch ≤ P_hpb ≤ P_hcb
     - Réduit toutes les puissances de 1 kVA simultanément jusqu'à ce que le min atteigne 36
 
@@ -547,11 +549,13 @@ def generer_scenarios_reduction_proportionnelle(
     scenarios_list = []
 
     for row in consos_agregees.iter_rows(named=True):
-        # Étape 1 : Calculer les puissances de base
-        p_hph_base = int(ceil(row['pmax_hph_kva']))
-        p_hch_base = int(ceil(row['pmax_hch_kva']))
-        p_hpb_base = int(ceil(row['pmax_hpb_kva']))
-        p_hcb_base = int(ceil(row['pmax_hcb_kva']))
+        # Étape 1 : Calculer les puissances de base depuis seuil de dépassement
+        # Au lieu de partir de pmax (qui peut avoir des pics isolés),
+        # partir de la puissance donnant ~seuil_depassement_h heures de dépassement
+        p_hph_base = trouver_puissance_pour_depassement(cdc, 'HPH', seuil_depassement_h)
+        p_hch_base = trouver_puissance_pour_depassement(cdc, 'HCH', seuil_depassement_h)
+        p_hpb_base = trouver_puissance_pour_depassement(cdc, 'HPB', seuil_depassement_h)
+        p_hcb_base = trouver_puissance_pour_depassement(cdc, 'HCB', seuil_depassement_h)
 
         # Étape 2 : Forcer la contrainte d'ordre (cascade)
         p_hph_initial = max(36, p_hph_base)
@@ -618,54 +622,144 @@ def generer_scenarios_reduction_proportionnelle(
 
 
 @app.function(hide_code=True)
-def calculer_plages_optimisation(
+def trouver_puissance_pour_depassement(
     cdc: pl.DataFrame,
     cadran: str,
-    seuil_depassement_max_h: float = 200.0,
-    marge_basse: float = 0.9,
-    marge_haute: float = 1.1
-) -> tuple[int, int]:
+    seuil_depassement_h: float
+) -> int:
     """
-    Calcule une plage [p_min, p_max] réaliste pour un cadran.
+    Trouve la puissance qui donne environ seuil_depassement_h heures de dépassement.
 
     Args:
         cdc: DataFrame avec colonnes 'cadran', 'pmax', 'duree_depassement_h'
         cadran: 'HPH', 'HCH', 'HPB', ou 'HCB'
-        seuil_depassement_max_h: Heures de dépassement max souhaitées (zone d'optimisation)
-        marge_basse: Facteur pour p_min (ex: 0.9 = -10%)
-        marge_haute: Facteur pour p_max (ex: 1.1 = +10%)
+        seuil_depassement_h: Heures de dépassement cibles (ex: 10h)
 
     Returns:
-        Tuple (p_min, p_max) en kVA
+        Puissance en kVA (arrondie à l'entier supérieur)
     """
     from math import ceil
 
-    # Min : Puissance avec seuil_depassement_max_h de dépassement
-    result_min = (
+    result = (
         cdc
         .filter(pl.col('cadran') == cadran)
-        .filter(pl.col('duree_depassement_h') <= seuil_depassement_max_h)
-        .sort('duree_depassement_h', descending=True)
+        .filter(pl.col('duree_depassement_h') >= seuil_depassement_h)
+        .sort('duree_depassement_h')
         .select('pmax')
         .limit(1)
     )
 
-    if result_min.height > 0:
-        p_min = max(36, int(ceil(result_min.item() * marge_basse)))
+    if result.height > 0:
+        return int(ceil(result.item()))
     else:
-        p_min = 36  # Seuil BTSUP
+        # Si aucune puissance ne donne ≥ seuil, prendre la max observée
+        p_max = cdc.filter(pl.col('cadran') == cadran).select(pl.col('pmax').max()).item()
+        return int(ceil(p_max))
 
-    # Max : Puissance max observée + marge
-    p_max_obs = cdc.filter(pl.col('cadran') == cadran).select(pl.col('pmax').max()).item()
-    p_max = int(ceil(p_max_obs * marge_haute))
 
-    # Protection : Forcer p_max >= p_min (cas profil basse puissance < 36 kVA)
-    # Si p_max < 36, le profil devrait être en BTINF, mais on génère quand même
-    # 1 scénario BTSUP minimal (36/36/36/36) pour comparaison
-    if p_max < p_min:
-        p_max = p_min
+@app.function(hide_code=True)
+def generer_scenarios_reduction_depuis_seuil(
+    consos_agregees: pl.DataFrame,
+    cdc: pl.DataFrame,
+    seuil_depassement_h: float = 10.0,
+    config_actuelle: dict = None
+) -> pl.DataFrame:
+    """
+    Génère scénarios par réduction simultanée depuis un seuil de dépassement constant.
 
-    return (p_min, p_max)
+    Principe :
+    1. Trouver puissance donnant ~seuil_depassement_h pour chaque cadran
+    2. Forcer contrainte P_hph ≤ P_hch ≤ P_hpb ≤ P_hcb (cascade)
+    3. Réduire simultanément de 1 kVA jusqu'à 36 kVA
+
+    Args:
+        consos_agregees: DataFrame avec énergies par PDL
+        cdc: DataFrame avec colonnes 'cadran', 'pmax', 'duree_depassement_h'
+        seuil_depassement_h: Heures de dépassement initial (défaut: 10h)
+        config_actuelle: Config actuelle pour marquage (optionnel)
+
+    Returns:
+        DataFrame avec scénarios générés
+    """
+    scenarios_list = []
+
+    for row in consos_agregees.iter_rows(named=True):
+        pdl = row['pdl']
+
+        # Étape 1 : Trouver puissance avec seuil_depassement_h pour chaque cadran
+        p_hph_base = trouver_puissance_pour_depassement(cdc, 'HPH', seuil_depassement_h)
+        p_hch_base = trouver_puissance_pour_depassement(cdc, 'HCH', seuil_depassement_h)
+        p_hpb_base = trouver_puissance_pour_depassement(cdc, 'HPB', seuil_depassement_h)
+        p_hcb_base = trouver_puissance_pour_depassement(cdc, 'HCB', seuil_depassement_h)
+
+        # Étape 2 : Forcer contrainte P_hph ≤ P_hch ≤ P_hpb ≤ P_hcb (cascade)
+        p_hph_initial = max(36, p_hph_base)
+        p_hch_initial = max(p_hph_initial, p_hch_base)
+        p_hpb_initial = max(p_hch_initial, p_hpb_base)
+        p_hcb_initial = max(p_hpb_initial, p_hcb_base)
+
+        print(f"PDL {pdl}: Initialisation depuis {seuil_depassement_h}h de dépassement")
+        print(f"  Puissances de base: HPH {p_hph_base}, HCH {p_hch_base}, "
+              f"HPB {p_hpb_base}, HCB {p_hcb_base}")
+        print(f"  Après contrainte: HPH {p_hph_initial}, HCH {p_hch_initial}, "
+              f"HPB {p_hpb_initial}, HCB {p_hcb_initial}")
+
+        # Étape 3 : Le minimum détermine le nombre d'itérations
+        p_min_initial = min(p_hph_initial, p_hch_initial, p_hpb_initial, p_hcb_initial)
+        nb_iterations = p_min_initial - 36 + 1
+
+        # Étape 4 : Réduction simultanée
+        for i in range(nb_iterations):
+            reduction = i
+            scenarios_list.append({
+                'pdl': pdl,
+                'energie_hph_kwh': row['energie_hph_kwh'],
+                'energie_hch_kwh': row['energie_hch_kwh'],
+                'energie_hpb_kwh': row['energie_hpb_kwh'],
+                'energie_hcb_kwh': row['energie_hcb_kwh'],
+                'puissance_hph_kva': max(36, p_hph_initial - reduction),
+                'puissance_hch_kva': max(36, p_hch_initial - reduction),
+                'puissance_hpb_kva': max(36, p_hpb_initial - reduction),
+                'puissance_hcb_kva': max(36, p_hcb_initial - reduction),
+            })
+
+        print(f"  → {len(scenarios_list)} scénarios générés")
+
+    # Créer DataFrame
+    df_scenarios = pl.DataFrame(scenarios_list)
+
+    # Ajouter dates, FTA, etc.
+    df_scenarios = (
+        df_scenarios
+        .with_columns([
+            pl.lit(datetime(2025, 8, 1)).dt.replace_time_zone('Europe/Paris').alias('date_debut'),
+            pl.lit(datetime(2026, 7, 31)).dt.replace_time_zone('Europe/Paris').alias('date_fin'),
+            pl.lit(365).alias('nb_jours'),
+            pl.lit(['BTSUPCU', 'BTSUPLU']).alias('formule_tarifaire_acheminement'),
+        ])
+        .explode('formule_tarifaire_acheminement')
+        .with_columns([
+            pl.col('puissance_hcb_kva').alias('puissance_souscrite_kva'),
+        ])
+    )
+
+    # Marquer scénario actuel
+    if config_actuelle is not None:
+        df_scenarios = df_scenarios.with_columns([
+            (
+                (pl.col('formule_tarifaire_acheminement') == config_actuelle['fta']) &
+                (pl.col('puissance_hph_kva') == config_actuelle['p_hph']) &
+                (pl.col('puissance_hch_kva') == config_actuelle['p_hch']) &
+                (pl.col('puissance_hpb_kva') == config_actuelle['p_hpb']) &
+                (pl.col('puissance_hcb_kva') == config_actuelle['p_hcb'])
+            ).alias('est_scenario_actuel')
+        ])
+    else:
+        df_scenarios = df_scenarios.with_columns([
+            pl.lit(False).alias('est_scenario_actuel')
+        ])
+
+    return df_scenarios
 
 
 @app.function(hide_code=True)
@@ -1003,10 +1097,23 @@ def _(
             'p_hcb': float(puissance_actuelle_hcb.value),
         }
 
-    _scenarios_btsup = generer_scenarios_exhaustifs(
-        consos_agregees,
-        cdc,
-        config_actuelle=_config_actuelle_btsup
+    # Générer scénarios depuis plusieurs seuils pour couvrir différentes zones
+    seuils_depassement = [5, 10, 20]  # heures
+    scenarios_btsup_list = []
+
+    for seuil in seuils_depassement:
+        scenarios = generer_scenarios_reduction_proportionnelle(
+            consos_agregees,
+            cdc,
+            seuil_depassement_h=seuil,
+            config_actuelle=_config_actuelle_btsup
+        )
+        scenarios_btsup_list.append(scenarios)
+
+    # Concat et dédupliquer
+    _scenarios_btsup = pl.concat(scenarios_btsup_list).unique(
+        subset=['puissance_hph_kva', 'puissance_hch_kva', 'puissance_hpb_kva', 'puissance_hcb_kva', 'formule_tarifaire_acheminement'],
+        keep='first'
     )
 
     # Calculer dépassements pour BTSUP
