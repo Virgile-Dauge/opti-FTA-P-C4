@@ -869,35 +869,42 @@ def calculer_duree_depassement_par_cadran(
     puissance_hcb_kva: float
 ) -> float:
     """
-    Calcule la durée totale de dépassement en tenant compte des puissances par cadran.
+    Calcule la durée totale de dépassement via lookup dans duree_depassement_h.
+
+    Principe : pour chaque cadran, trouve la ligne avec min(pmax > seuil)
+    et lit duree_depassement_h (qui contient le cumul pré-calculé des heures
+    où la puissance dépasse ce seuil).
 
     Args:
-        cdc: DataFrame agrégé avec colonnes 'pmax' (kVA), 'cadran', 'duree_h' (heures)
+        cdc: DataFrame agrégé avec colonnes 'pmax', 'cadran', 'duree_depassement_h'
         puissance_hph_kva, puissance_hch_kva, puissance_hpb_kva, puissance_hcb_kva:
             Puissances souscrites par cadran (kVA)
 
     Returns:
         Durée totale de dépassement en heures (somme sur tous les cadrans)
     """
-    # Mapping cadran → seuil (plus élégant que when/then)
-    seuils_map = {
+    seuils = {
         'HPH': puissance_hph_kva,
         'HCH': puissance_hch_kva,
         'HPB': puissance_hpb_kva,
         'HCB': puissance_hcb_kva,
     }
 
-    return (
-        cdc
-        .with_columns([
-            pl.col('cadran').replace(seuils_map).cast(pl.Float64).alias('puissance_seuil')
-        ])
-        # Ne compter que les dépassements (pmax > seuil du cadran)
-        .filter(pl.col('pmax') > pl.col('puissance_seuil'))
-        # Sommer directement les durées pré-agrégées
-        .select(pl.col('duree_h').sum())
-        .item()
-    )
+    total = 0.0
+    for cadran, seuil in seuils.items():
+        # Lookup optimisé : trouver min(pmax > seuil) pour ce cadran
+        # et lire duree_depassement_h (heures cumulées de dépassement)
+        result = (
+            cdc
+            .filter((pl.col('cadran') == cadran) & (pl.col('pmax') > seuil))
+            .sort('pmax')  # Tri croissant pour avoir min en premier
+            .select('duree_depassement_h')
+            .limit(1)  # Une seule valeur suffit
+        )
+        if result.height > 0:  # Si au moins une ligne trouvée
+            total += result.item()  # Ajouter au total
+
+    return total
 
 
 @app.cell
