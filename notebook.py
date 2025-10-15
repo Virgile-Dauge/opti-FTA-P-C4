@@ -617,6 +617,182 @@ def generer_scenarios_reduction_proportionnelle(
     return df_scenarios
 
 
+@app.function(hide_code=True)
+def calculer_plages_optimisation(
+    cdc: pl.DataFrame,
+    cadran: str,
+    seuil_depassement_max_h: float = 200.0,
+    marge_basse: float = 0.9,
+    marge_haute: float = 1.1
+) -> tuple[int, int]:
+    """
+    Calcule une plage [p_min, p_max] réaliste pour un cadran.
+
+    Args:
+        cdc: DataFrame avec colonnes 'cadran', 'pmax', 'duree_depassement_h'
+        cadran: 'HPH', 'HCH', 'HPB', ou 'HCB'
+        seuil_depassement_max_h: Heures de dépassement max souhaitées (zone d'optimisation)
+        marge_basse: Facteur pour p_min (ex: 0.9 = -10%)
+        marge_haute: Facteur pour p_max (ex: 1.1 = +10%)
+
+    Returns:
+        Tuple (p_min, p_max) en kVA
+    """
+    from math import ceil
+
+    # Min : Puissance avec seuil_depassement_max_h de dépassement
+    result_min = (
+        cdc
+        .filter(pl.col('cadran') == cadran)
+        .filter(pl.col('duree_depassement_h') <= seuil_depassement_max_h)
+        .sort('duree_depassement_h', descending=True)
+        .select('pmax')
+        .limit(1)
+    )
+
+    if result_min.height > 0:
+        p_min = max(36, int(ceil(result_min.item() * marge_basse)))
+    else:
+        p_min = 36  # Seuil BTSUP
+
+    # Max : Puissance max observée + marge
+    p_max_obs = cdc.filter(pl.col('cadran') == cadran).select(pl.col('pmax').max()).item()
+    p_max = int(ceil(p_max_obs * marge_haute))
+
+    # Protection : Forcer p_max >= p_min (cas profil basse puissance < 36 kVA)
+    # Si p_max < 36, le profil devrait être en BTINF, mais on génère quand même
+    # 1 scénario BTSUP minimal (36/36/36/36) pour comparaison
+    if p_max < p_min:
+        p_max = p_min
+
+    return (p_min, p_max)
+
+
+@app.function(hide_code=True)
+def generer_scenarios_exhaustifs(
+    consos_agregees: pl.DataFrame,
+    cdc: pl.DataFrame,
+    config_actuelle: dict = None
+) -> pl.DataFrame:
+    """
+    Génère TOUS les scénarios valides avec contrainte P_hph ≤ P_hch ≤ P_hpb ≤ P_hcb.
+
+    Utilise combinations_with_replacement pour générer efficacement les combinaisons
+    croissantes de puissances dans des plages réalistes par cadran.
+
+    Args:
+        consos_agregees: DataFrame avec énergies par PDL et cadran
+        cdc: DataFrame avec colonnes 'cadran', 'pmax', 'duree_depassement_h'
+        config_actuelle: Config actuelle pour marquage (optionnel)
+
+    Returns:
+        DataFrame avec tous les scénarios valides
+    """
+    from itertools import combinations_with_replacement
+
+    scenarios_list = []
+
+    for row in consos_agregees.iter_rows(named=True):
+        pdl = row['pdl']
+
+        # Calculer plages réalistes par cadran
+        p_hph_min, p_hph_max = calculer_plages_optimisation(cdc, 'HPH')
+        p_hch_min, p_hch_max = calculer_plages_optimisation(cdc, 'HCH')
+        p_hpb_min, p_hpb_max = calculer_plages_optimisation(cdc, 'HPB')
+        p_hcb_min, p_hcb_max = calculer_plages_optimisation(cdc, 'HCB')
+
+        # Pool global (union des plages)
+        p_min = min(p_hph_min, p_hch_min, p_hpb_min, p_hcb_min)
+        p_max = max(p_hph_max, p_hch_max, p_hpb_max, p_hcb_max)
+        puissances = range(p_min, p_max + 1)
+
+        # Générer combinaisons croissantes (garantit p_hph ≤ p_hch ≤ p_hpb ≤ p_hcb)
+        for p_hph, p_hch, p_hpb, p_hcb in combinations_with_replacement(puissances, 4):
+            # Filtres par plage individuelle de chaque cadran
+            if not (p_hph_min <= p_hph <= p_hph_max):
+                continue
+            if not (p_hch_min <= p_hch <= p_hch_max):
+                continue
+            if not (p_hpb_min <= p_hpb <= p_hpb_max):
+                continue
+            if not (p_hcb_min <= p_hcb <= p_hcb_max):
+                continue
+
+            scenarios_list.append({
+                'pdl': pdl,
+                'energie_hph_kwh': row['energie_hph_kwh'],
+                'energie_hch_kwh': row['energie_hch_kwh'],
+                'energie_hpb_kwh': row['energie_hpb_kwh'],
+                'energie_hcb_kwh': row['energie_hcb_kwh'],
+                'puissance_hph_kva': p_hph,
+                'puissance_hch_kva': p_hch,
+                'puissance_hpb_kva': p_hpb,
+                'puissance_hcb_kva': p_hcb,
+            })
+
+        print(f"PDL {pdl}: {len(scenarios_list)} scénarios générés")
+        print(f"  Plages: HPH [{p_hph_min}-{p_hph_max}], HCH [{p_hch_min}-{p_hch_max}], "
+              f"HPB [{p_hpb_min}-{p_hpb_max}], HCB [{p_hcb_min}-{p_hcb_max}]")
+
+    # Protection : Gérer le cas 0 scénarios générés (profil < 36 kVA partout)
+    if len(scenarios_list) == 0:
+        print("⚠️ Aucun scénario généré (profil probablement < 36 kVA)")
+        # Retourner DataFrame vide structuré avec toutes les colonnes nécessaires
+        return pl.DataFrame(schema={
+            'pdl': pl.String,
+            'energie_hph_kwh': pl.Float64,
+            'energie_hch_kwh': pl.Float64,
+            'energie_hpb_kwh': pl.Float64,
+            'energie_hcb_kwh': pl.Float64,
+            'puissance_hph_kva': pl.Int64,
+            'puissance_hch_kva': pl.Int64,
+            'puissance_hpb_kva': pl.Int64,
+            'puissance_hcb_kva': pl.Int64,
+            'date_debut': pl.Datetime,
+            'date_fin': pl.Datetime,
+            'nb_jours': pl.Int32,
+            'puissance_souscrite_kva': pl.Int64,
+            'formule_tarifaire_acheminement': pl.String,
+            'est_scenario_actuel': pl.Boolean,
+        })
+
+    # Créer DataFrame (on sait qu'il n'est pas vide)
+    df_scenarios = pl.DataFrame(scenarios_list)
+
+    # Ajouter dates, FTA, etc.
+    df_scenarios = (
+        df_scenarios
+        .with_columns([
+            pl.lit(datetime(2025, 8, 1)).dt.replace_time_zone('Europe/Paris').alias('date_debut'),
+            pl.lit(datetime(2026, 7, 31)).dt.replace_time_zone('Europe/Paris').alias('date_fin'),
+            pl.lit(365).alias('nb_jours'),
+            pl.lit(['BTSUPCU', 'BTSUPLU']).alias('formule_tarifaire_acheminement'),
+        ])
+        .explode('formule_tarifaire_acheminement')
+        .with_columns([
+            pl.col('puissance_hcb_kva').alias('puissance_souscrite_kva'),
+        ])
+    )
+
+    # Marquer scénario actuel si fourni
+    if config_actuelle is not None:
+        df_scenarios = df_scenarios.with_columns([
+            (
+                (pl.col('formule_tarifaire_acheminement') == config_actuelle['fta']) &
+                (pl.col('puissance_hph_kva') == config_actuelle['p_hph']) &
+                (pl.col('puissance_hch_kva') == config_actuelle['p_hch']) &
+                (pl.col('puissance_hpb_kva') == config_actuelle['p_hpb']) &
+                (pl.col('puissance_hcb_kva') == config_actuelle['p_hcb'])
+            ).alias('est_scenario_actuel')
+        ])
+    else:
+        df_scenarios = df_scenarios.with_columns([
+            pl.lit(False).alias('est_scenario_actuel')
+        ])
+
+    return df_scenarios
+
+
 @app.cell(hide_code=True)
 def _(
     cdc,
@@ -827,8 +1003,9 @@ def _(
             'p_hcb': float(puissance_actuelle_hcb.value),
         }
 
-    _scenarios_btsup = generer_scenarios_reduction_proportionnelle(
+    _scenarios_btsup = generer_scenarios_exhaustifs(
         consos_agregees,
+        cdc,
         config_actuelle=_config_actuelle_btsup
     )
 
