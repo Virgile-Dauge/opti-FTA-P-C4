@@ -20,7 +20,7 @@ async with app.setup(hide_code=True):
     import marimo as mo
     import polars as pl
     from pathlib import Path
-    from datetime import datetime, time
+    from datetime import datetime, time, timedelta
     import io
     import altair as alt
 
@@ -243,12 +243,31 @@ def _(
 ):
     mo.stop(not file_upload.value, mo.md("⚠️ Veuillez uploader un fichier CSV"))
 
-    # Pipeline EAGER - lecture directe depuis mémoire (temporaire avec toutes les colonnes)
+    # Lecture initiale pour calculer la période d'analyse (12 derniers mois)
+    _df_initial = pl.read_csv(io.BytesIO(file_upload.contents()), separator=';')
+
+    date_max_donnees = (
+        _df_initial
+        .filter(pl.col('Grandeur physique') == 'PA')
+        .select(pl.col('Horodate').str.strptime(pl.Datetime, '%Y-%m-%d %H:%M:%S').max())
+        .item()
+    )
+    date_fin_analyse = date_max_donnees
+    date_debut_analyse = date_fin_analyse - timedelta(days=365)
+
+    # Pipeline EAGER - lecture directe depuis mémoire avec filtre temporel
     _cdc_temp = (
-        pl.read_csv(io.BytesIO(file_upload.contents()), separator=';')
+        _df_initial
         .filter(pl.col('Grandeur physique') == 'PA')
         .with_columns([
             pl.col('Horodate').str.strptime(pl.Datetime, '%Y-%m-%d %H:%M:%S'),
+        ])
+        # Filtrage sur 12 derniers mois disponibles
+        .filter(
+            (pl.col('Horodate') >= date_debut_analyse) &
+            (pl.col('Horodate') <= date_fin_analyse)
+        )
+        .with_columns([
             (pl.col('Valeur') / 1000.0).alias('Valeur'),
         ])
         .with_columns([
@@ -349,7 +368,7 @@ def _(
               .alias('duree_depassement_h')
         ])
     )
-    return cdc, consos_agregees
+    return cdc, consos_agregees, date_debut_analyse, date_fin_analyse
 
 
 @app.cell(hide_code=True)
@@ -459,7 +478,7 @@ def fonctions_enrichissement():
 
 
 @app.cell(hide_code=True)
-def _(consos_agregees):
+def _(consos_agregees, date_debut_analyse, date_fin_analyse):
     _nb_pdl = len(consos_agregees)
     _energie_totale = (
         consos_agregees['energie_hph_kwh'].sum() +
@@ -467,6 +486,7 @@ def _(consos_agregees):
         consos_agregees['energie_hpb_kwh'].sum() +
         consos_agregees['energie_hcb_kwh'].sum()
     )
+    _nb_jours_analyse = (date_fin_analyse - date_debut_analyse).days
 
     mo.md(f"""
     ## 🔄 Agrégation par PDL et pivotage des cadrans
@@ -475,6 +495,16 @@ def _(consos_agregees):
 
     - Nombre de PDL : {_nb_pdl}
     - Énergie totale : {_energie_totale:,.0f} kWh
+
+    ### 📅 Période d'analyse automatique
+
+    - **Date début** : {date_debut_analyse.strftime('%d/%m/%Y')}
+    - **Date fin** : {date_fin_analyse.strftime('%d/%m/%Y')}
+    - **Durée** : {_nb_jours_analyse} jours ({_nb_jours_analyse/365:.2f} années)
+
+    ✅ Données filtrées sur les **12 derniers mois disponibles** pour cohérence des calculs.
+
+    _Note : Ces statistiques sont ensuite projetées sur la période tarifaire 2025-2026._
     """)
     return
 
