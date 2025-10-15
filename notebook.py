@@ -1097,23 +1097,12 @@ def _(
             'p_hcb': float(puissance_actuelle_hcb.value),
         }
 
-    # Générer scénarios depuis plusieurs seuils pour couvrir différentes zones
-    seuils_depassement = [5, 10, 20]  # heures
-    scenarios_btsup_list = []
-
-    for seuil in seuils_depassement:
-        scenarios = generer_scenarios_reduction_proportionnelle(
-            consos_agregees,
-            cdc,
-            seuil_depassement_h=seuil,
-            config_actuelle=_config_actuelle_btsup
-        )
-        scenarios_btsup_list.append(scenarios)
-
-    # Concat et dédupliquer
-    _scenarios_btsup = pl.concat(scenarios_btsup_list).unique(
-        subset=['puissance_hph_kva', 'puissance_hch_kva', 'puissance_hpb_kva', 'puissance_hcb_kva', 'formule_tarifaire_acheminement'],
-        keep='first'
+    # Générer scénarios depuis un seul seuil de dépassement
+    _scenarios_btsup = generer_scenarios_reduction_proportionnelle(
+        consos_agregees,
+        cdc,
+        seuil_depassement_h=10.0,
+        config_actuelle=_config_actuelle_btsup
     )
 
     # Calculer dépassements pour BTSUP
