@@ -339,6 +339,15 @@ def _(
         .agg([
             (pl.len() * pas_heures).alias('duree_h')
         ])
+        # Trier par pmax décroissant pour calculer le cumul de dépassement
+        .sort(['Identifiant PRM', 'cadran', 'pmax'], descending=[False, False, True])
+        .with_columns([
+            # Cumul des heures = nombre d'heures où cette puissance est dépassée
+            pl.col('duree_h')
+              .cum_sum()
+              .over(['Identifiant PRM', 'cadran'])
+              .alias('duree_depassement_h')
+        ])
     )
     return cdc, consos_agregees
 
