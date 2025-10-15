@@ -1244,18 +1244,34 @@ def _():
 
 
 @app.cell(hide_code=True)
-def _(cdc):
+def _():
+    # Slider pour contrôler la plage de durée affichée (focus zone d'optimisation)
+    duree_max_monotone = mo.ui.slider(
+        start=10,
+        stop=300,
+        value=50,  # Défaut à 200h (≈2400€ de pénalités à 12€/h)
+        step=5,
+        label="Durée max affichée (h/an)",
+        show_value=True
+    )
+    duree_max_monotone
+    return (duree_max_monotone,)
+
+
+@app.cell(hide_code=True)
+def _(cdc, duree_max_monotone):
     # Courbe de monotone (load duration curve) par cadran
-    # Utilise directement la colonne duree_depassement_h calculée dans cdc
+    # Filtre sur zone d'optimisation pertinente (0-Xh de dépassement)
     df_monotone_final = (
         cdc
+        .filter(pl.col('duree_depassement_h') <= duree_max_monotone.value)
         .select(['cadran', 'pmax', 'duree_depassement_h'])
         .rename({'duree_depassement_h': 'duree_cumulee_h'})
         .to_pandas()
     )
 
     # Graphique de monotone
-    monotone_chart = alt.Chart(df_monotone_final).mark_line(point=False).encode(
+    monotone_chart = alt.Chart(df_monotone_final).mark_line(point=True).encode(
         x=alt.X('duree_cumulee_h:Q',
                 title='Durée de dépassement (heures/an)',
                 scale=alt.Scale(zero=True)),
@@ -1282,17 +1298,26 @@ def _(cdc):
         }
     ).interactive()
 
-    _note_monotone = mo.md("""
-    **Lecture du graphique** :
-    - **Axe horizontal** : durée cumulée dans l'année (heures)
-    - **Axe vertical** : puissance en kVA
-    - Chaque point (x, y) signifie : "la puissance y est dépassée pendant x heures dans l'année"
+    _note_monotone = mo.md(f"""
+    **Lecture du graphique (focus zone d'optimisation tarifaire)** :
+
+    **Plage affichée** : 0-{duree_max_monotone.value}h de dépassement
+    - **Coût pénalités max** : ~{duree_max_monotone.value * 12:,.0f}€/an (à 12€/h)
+    - **Au-delà de 200h** : augmenter la puissance souscrite devient rentable
+    - **Puissance idle** (consommation de base) : masquée pour focus sur variabilité
+
+    **Interprétation** :
+    - Chaque point (x, y) signifie : "la puissance y est dépassée pendant x heures/an"
     - Plus la courbe est haute à droite, plus la consommation est stable
     - Une chute rapide à gauche indique des pics de puissance courts
-    - **HPH** (rouge) : Heures Pleines Hiver
+
+    **Cadrans tarifaires** :
+    - **HPH** (rouge) : Heures Pleines Hiver - période la plus coûteuse
     - **HCH** (orange) : Heures Creuses Hiver
     - **HPB** (bleu) : Heures Pleines Basse saison
     - **HCB** (vert) : Heures Creuses Basse saison
+
+    💡 Ajustez le slider ci-dessus pour explorer différentes plages de dépassement.
     """)
 
     mo.vstack([mo.ui.altair_chart(monotone_chart), _note_monotone])
@@ -1300,12 +1325,14 @@ def _(cdc):
 
 
 @app.cell(hide_code=True)
-def _(cdc):
+def _(cdc, duree_max_monotone):
     # Histogramme durée cumulée par tranche de puissance et cadran
+    # Filtre sur même plage que courbe de monotone pour cohérence
 
     # Agréger durée par puissance arrondie et cadran
     df_histo = (
         cdc
+        .filter(pl.col('duree_depassement_h') <= duree_max_monotone.value)
         .with_columns([
             # Arrondir pmax à l'entier le plus proche pour réduire la granularité
             pl.col('pmax').round(0).alias('pmax_arrondi')
@@ -1343,12 +1370,13 @@ def _(cdc):
         title="Distribution de la durée par niveau de puissance et cadran"
     ).interactive()
 
-    _note_histo = mo.md("""
-    **Lecture du graphique** :
+    _note_histo = mo.md(f"""
+    **Lecture du graphique (focus zone d'optimisation)** :
     - Chaque barre représente le temps passé à un niveau de puissance donné
     - Les couleurs empilées montrent la répartition entre cadrans tarifaires
     - Les pics indiquent les niveaux de puissance les plus fréquents
-    - Une distribution étalée indique une consommation variable
+    - **Filtre actif** : seules les puissances avec ≤{duree_max_monotone.value}h de dépassement sont affichées
+    - Permet d'identifier les niveaux de puissance critiques pour l'optimisation tarifaire
     """)
 
     mo.vstack([mo.ui.altair_chart(histo_chart), _note_histo])
@@ -1363,11 +1391,14 @@ def _():
 
 @app.cell(hide_code=True)
 def _(cdc):
+    _min = int(cdc['pmax'].min())
+    _max = int(cdc['pmax'].max())
+    _moy = (_min + _max)//2
     # Slider pour choisir un seuil de puissance
     seuil_puissance = mo.ui.slider(
-        start=int(cdc['pmax'].min()),
-        stop=int(cdc['pmax'].max()),
-        value=40,
+        start=_min,
+        stop=_max,
+        value=_moy,
         step=1,
         label="Seuil de puissance souscrite (kVA)",
         show_value=True
