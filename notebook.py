@@ -1,7 +1,7 @@
 import marimo
 
 __generated_with = "0.16.5"
-app = marimo.App()
+app = marimo.App(width="medium")
 
 async with app.setup(hide_code=True):
     # Initialization code that runs before all other cells
@@ -22,6 +22,7 @@ async with app.setup(hide_code=True):
     from pathlib import Path
     from datetime import datetime, time
     import io
+    import altair as alt
 
     # Import electricore pour calculs TURPE
     from electricore.core.pipelines.turpe import (
@@ -1100,8 +1101,6 @@ def _(cout_actuel, resultats):
 @app.cell(hide_code=True)
 def _(cout_actuel, resultats):
     # Graphique interactif avec marqueurs pour actuel et optimal
-    import altair as alt
-
     # Filtrer sur le premier PDL pour la visualisation
     pdl_unique = resultats['pdl'][0]
     df_plot = (
@@ -1222,27 +1221,146 @@ def _(cout_actuel, resultats):
     return
 
 
+@app.cell
+def _():
+    mo.md(r"""## 📈 Analyse du profil de charge""")
+    return
+
+
 @app.cell(hide_code=True)
-def _(resultats):
-    # Export Excel - Retirer les timezones pour compatibilité xlsxwriter
-    excel_buffer = io.BytesIO()
+def _(cdc):
+    # Courbe de monotone (load duration curve) par cadran
 
-    # Créer une copie sans timezone pour l'export
-    resultats_excel = resultats.with_columns([
-        pl.col('debut').dt.convert_time_zone('UTC').dt.replace_time_zone(None).alias('debut'),
-        pl.col('fin').dt.convert_time_zone('UTC').dt.replace_time_zone(None).alias('fin'),
-    ])
-
-    resultats_excel.write_excel(excel_buffer)
-    excel_data = excel_buffer.getvalue()
-
-    _download_button = mo.download(
-        data=excel_data,
-        filename="Optimisation_TURPE_electricore.xlsx",
-        label="📥 Télécharger les résultats détaillés (Excel)",
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    # Préparer les données : trier par puissance décroissante et calculer durée cumulée
+    df_monotone = (
+        cdc
+        .sort('pmax', descending=True)
+        .group_by('cadran')
+        .agg([
+            pl.col('pmax').alias('pmax_list'),
+            pl.col('duree_h').alias('duree_list')
+        ])
     )
-    _download_button
+
+    # Créer une liste de dataframes par cadran avec durée cumulée
+    monotone_data = []
+    for row in df_monotone.iter_rows(named=True):
+        cadran = row['cadran']
+        pmax_vals = row['pmax_list']
+        duree_vals = row['duree_list']
+
+        # Trier par pmax décroissant
+        sorted_indices = sorted(range(len(pmax_vals)), key=lambda i: pmax_vals[i], reverse=True)
+
+        duree_cumul = 0
+        for idx in sorted_indices:
+            duree_cumul += duree_vals[idx]
+            monotone_data.append({
+                'cadran': cadran,
+                'pmax': pmax_vals[idx],
+                'duree_cumulee_h': duree_cumul
+            })
+
+    df_monotone_final = pl.DataFrame(monotone_data).to_pandas()
+
+    # Graphique de monotone
+    monotone_chart = alt.Chart(df_monotone_final).mark_line(point=False).encode(
+        x=alt.X('duree_cumulee_h:Q',
+                title='Durée cumulée (heures/an)',
+                scale=alt.Scale(zero=True)),
+        y=alt.Y('pmax:Q',
+                title='Puissance (kVA)',
+                scale=alt.Scale(zero=False)),
+        color=alt.Color('cadran:N',
+                       title='Cadran tarifaire',
+                       scale=alt.Scale(
+                           domain=['HPH', 'HCH', 'HPB', 'HCB'],
+                           range=['#e74c3c', '#e67e22', '#3498db', '#2ecc71']
+                       )),
+        tooltip=[
+            alt.Tooltip('cadran:N', title='Cadran'),
+            alt.Tooltip('pmax:Q', title='Puissance (kVA)', format='.1f'),
+            alt.Tooltip('duree_cumulee_h:Q', title='Durée cumulée (h)', format=',.0f')
+        ]
+    ).properties(
+        width=800,
+        height=500,
+        title={
+            "text": "Courbe de monotone - Profil de puissance par cadran tarifaire",
+            "subtitle": "Cette courbe montre la durée pendant laquelle chaque niveau de puissance est dépassé"
+        }
+    ).interactive()
+
+    _note_monotone = mo.md("""
+    **Lecture du graphique** :
+    - **Axe horizontal** : durée cumulée dans l'année (heures)
+    - **Axe vertical** : puissance en kVA
+    - Chaque point (x, y) signifie : "la puissance y est dépassée pendant x heures dans l'année"
+    - Plus la courbe est haute à droite, plus la consommation est stable
+    - Une chute rapide à gauche indique des pics de puissance courts
+    - **HPH** (rouge) : Heures Pleines Hiver
+    - **HCH** (orange) : Heures Creuses Hiver
+    - **HPB** (bleu) : Heures Pleines Basse saison
+    - **HCB** (vert) : Heures Creuses Basse saison
+    """)
+
+    mo.vstack([mo.ui.altair_chart(monotone_chart), _note_monotone])
+    return
+
+
+@app.cell(hide_code=True)
+def _(cdc):
+    # Histogramme durée cumulée par tranche de puissance et cadran
+
+    # Agréger durée par puissance arrondie et cadran
+    df_histo = (
+        cdc
+        .with_columns([
+            # Arrondir pmax à l'entier le plus proche pour réduire la granularité
+            pl.col('pmax').round(0).alias('pmax_arrondi')
+        ])
+        .group_by(['cadran', 'pmax_arrondi'])
+        .agg([
+            pl.col('duree_h').sum().alias('duree_totale_h')
+        ])
+        .sort(['cadran', 'pmax_arrondi'])
+        .to_pandas()
+    )
+
+    # Créer l'histogramme empilé
+    histo_chart = alt.Chart(df_histo).mark_bar().encode(
+        x=alt.X('pmax_arrondi:Q',
+                title='Puissance (kVA)',
+                bin=alt.Bin(maxbins=50)),
+        y=alt.Y('sum(duree_totale_h):Q',
+                title='Durée totale (heures/an)',
+                stack='zero'),
+        color=alt.Color('cadran:N',
+                       title='Cadran tarifaire',
+                       scale=alt.Scale(
+                           domain=['HPH', 'HCH', 'HPB', 'HCB'],
+                           range=['#e74c3c', '#e67e22', '#3498db', '#2ecc71']
+                       )),
+        tooltip=[
+            alt.Tooltip('cadran:N', title='Cadran'),
+            alt.Tooltip('pmax_arrondi:Q', title='Puissance (kVA)', format='.0f'),
+            alt.Tooltip('sum(duree_totale_h):Q', title='Durée (h)', format=',.1f')
+        ]
+    ).properties(
+        width=800,
+        height=400,
+        title="Distribution de la durée par niveau de puissance et cadran"
+    ).interactive()
+
+    _note_histo = mo.md("""
+    **Lecture du graphique** :
+    - Chaque barre représente le temps passé à un niveau de puissance donné
+    - Les couleurs empilées montrent la répartition entre cadrans tarifaires
+    - Les pics indiquent les niveaux de puissance les plus fréquents
+    - Une distribution étalée indique une consommation variable
+    """)
+
+    mo.vstack([mo.ui.altair_chart(histo_chart), _note_histo])
     return
 
 
