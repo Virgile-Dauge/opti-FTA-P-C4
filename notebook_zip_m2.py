@@ -43,10 +43,10 @@ def _():
 
 @app.cell(hide_code=True)
 def _():
-    type_fichier = mo.ui.radio(
+    type_fichier = mo.ui.multiselect(
         options=["M-2", "M-6"],
-        value="M-2",
-        label="Type de fichier à extraire"
+        value=["M-2", "M-6"],
+        label="Types de fichiers à traiter"
     )
     type_fichier
     return (type_fichier,)
@@ -104,7 +104,7 @@ def _(folder_path):
 
 @app.cell
 def _():
-    mo.md(r"""## 🔓 Extraction et lecture des CSV""")
+    mo.md(r"""## 🔓 Extraction et lecture des CSV M-2""")
     return
 
 
@@ -140,6 +140,8 @@ def extract_all_with_7z(folder_path: Path, password: str) -> tuple[str, str]:
 
 @app.cell(hide_code=True)
 def _(folder_path, password, type_fichier):
+    mo.stop("M-2" not in type_fichier.value, "")
+
     # Extraction avec 7z via le script bash
     try:
         stdout, stderr = extract_all_with_7z(folder_path, password)
@@ -161,9 +163,8 @@ def _(folder_path, password, type_fichier):
     except Exception as e:
         mo.md(f"❌ **Erreur inattendue** : {str(e)}")
 
-    # Lecture des CSV extraits
-    pattern = type_fichier.value
-    csv_files = sorted([f for f in folder_path.glob("ENEDIS_*.csv") if pattern in f.name])
+    # Lecture des CSV M-2 extraits
+    csv_files = sorted([f for f in folder_path.glob("ENEDIS_*.csv") if "M-2" in f.name])
 
     all_dataframes = []
     for csv_file in csv_files:
@@ -173,13 +174,14 @@ def _(folder_path, password, type_fichier):
         except Exception as e:
             mo.md(f"⚠️ Impossible de lire `{csv_file.name}` : {str(e)}")
 
-    mo.md(f"✅ **{len(all_dataframes)} fichiers CSV de type '{pattern}' chargés**")
+    mo.md(f"✅ **{len(all_dataframes)} fichiers CSV M-2 chargés**")
     return (all_dataframes,)
 
 
 @app.cell(hide_code=True)
-def _(all_dataframes):
-    mo.stop(len(all_dataframes) == 0, mo.md("❌ Aucun DataFrame chargé"))
+def _(all_dataframes, type_fichier):
+    mo.stop("M-2" not in type_fichier.value, "")
+    mo.stop(len(all_dataframes) == 0, mo.md("❌ Aucun DataFrame M-2 chargé"))
 
     # Concaténation de tous les DataFrames
     df_concat = (
@@ -279,12 +281,14 @@ def _(df_final):
 
 @app.cell
 def _():
-    mo.md(r"""## 📤 Export par mois""")
+    mo.md(r"""## 📤 Export M-2 par mois""")
     return
 
 
 @app.cell(hide_code=True)
-def _(df_final):
+def _(df_final, type_fichier):
+    mo.stop("M-2" not in type_fichier.value, "")
+
     # Ajout d'une colonne mois pour le groupement (en filtrant les null)
     df_with_month = (
         df_final
@@ -317,12 +321,14 @@ def _(df_final):
 
     {_stats_text}
     """)
-    return (df_with_month, mois_stats)
+    return df_with_month, mois_stats
 
 
 @app.cell(hide_code=True)
-def _(df_with_month, folder_path, mois_stats):
-    # Export d'un CSV par mois
+def _(df_with_month, folder_path, mois_stats, type_fichier):
+    mo.stop("M-2" not in type_fichier.value, "")
+
+    # Export d'un CSV M-2 par mois
     export_logs = []
 
     for row in mois_stats.iter_rows(named=True):
@@ -332,8 +338,8 @@ def _(df_with_month, folder_path, mois_stats):
         # Filtrer les données du mois
         df_mois = df_with_month.filter(pl.col("mois") == mois)
 
-        # Nom du fichier
-        export_file = folder_path / f"export_{mois}.csv"
+        # Nom du fichier M-2
+        export_file = folder_path / f"export_M2_{mois}.csv"
 
         # Export CSV
         df_mois.write_csv(export_file, separator=";")
@@ -348,6 +354,159 @@ def _(df_with_month, folder_path, mois_stats):
     {len(export_logs)} fichiers créés dans `{folder_path}` :
 
     {_export_summary}
+    """)
+    return
+
+
+@app.cell
+def _():
+    mo.md(r"""## 🔓 Extraction et lecture des CSV M-6""")
+    return
+
+
+@app.cell(hide_code=True)
+def _(folder_path, password, type_fichier):
+    mo.stop("M-6" not in type_fichier.value, "")
+
+    # Extraction avec 7z via le script bash (identique à M-2)
+    try:
+        stdout_m6, stderr_m6 = extract_all_with_7z(folder_path, password)
+
+        # Affichage du résultat de l'extraction
+        _extraction_log_m6 = stdout_m6.replace('\n', '\n\n')
+
+        mo.md(f"""
+    ## 📊 Résultat de l'extraction M-6 (7z)
+
+    {_extraction_log_m6}
+
+    ---
+        """)
+    except subprocess.TimeoutExpired:
+        mo.md("❌ **Timeout M-6** : L'extraction a pris trop de temps (>5 minutes)")
+    except FileNotFoundError as e:
+        mo.md(f"❌ **Erreur M-6** : {str(e)}")
+    except Exception as e:
+        mo.md(f"❌ **Erreur inattendue M-6** : {str(e)}")
+    return
+
+
+@app.cell(hide_code=True)
+def _(folder_path, type_fichier):
+    mo.stop("M-6" not in type_fichier.value, "")
+
+    import re
+
+    # Trouver tous les CSV M-6
+    csv_files_m6 = sorted([f for f in folder_path.glob("ENEDIS_*.csv") if "M-6" in f.name])
+
+    all_dataframes_m6 = []
+    for csv_file_m6 in csv_files_m6:
+        try:
+            df_m6 = pl.read_csv(csv_file_m6, separator=';')
+
+            # Extraire le timestamp du nom de fichier (derniers 14 chiffres avant .csv)
+            # Ex: 2026-04-ENEDIS_TURPE7HC_M-6_GRD-F091_001_001_20250918100525.csv
+            #                                                     ^^^^^^^^^^^^^^
+            match = re.search(r'(\d{14})\.csv$', csv_file_m6.name)
+            timestamp = match.group(1) if match else "00000000000000"
+
+            # Ajouter métadonnées pour traçabilité
+            df_m6 = df_m6.with_columns([
+                pl.lit(timestamp).alias("_source_timestamp"),
+                pl.lit(csv_file_m6.name).alias("_source_file")
+            ])
+            all_dataframes_m6.append(df_m6)
+        except Exception as e:
+            mo.md(f"⚠️ Impossible de lire `{csv_file_m6.name}` : {str(e)}")
+
+    # Concaténation (avec how="diagonal" pour gérer les colonnes différentes)
+    if len(all_dataframes_m6) > 0:
+        df_m6_concat = pl.concat(all_dataframes_m6, how="diagonal")
+        mo.md(f"✅ **{len(all_dataframes_m6)} fichiers CSV M-6 chargés** : {len(df_m6_concat):,} lignes")
+    else:
+        mo.md("⚠️ Aucun fichier M-6 trouvé")
+        df_m6_concat = None
+    return (df_m6_concat,)
+
+
+@app.cell
+def _():
+    mo.md(r"""## 🔗 Jointure M-6 avec base client""")
+    return
+
+
+@app.cell(hide_code=True)
+def _(base_client, df_m6_concat, type_fichier):
+    mo.stop("M-6" not in type_fichier.value, "")
+    mo.stop(df_m6_concat is None, mo.md("⚠️ Aucune donnée M-6 à traiter"))
+
+    # Conversion DATE_BASCULE + cast PRM
+    df_m6_typed = df_m6_concat.with_columns([
+        pl.col("DATE_BASCULE").str.to_date(),
+        pl.col("PRM").cast(pl.Utf8)
+    ])
+
+    # Join avec base_client
+    df_m6_joined = base_client.join(df_m6_typed, on="PRM", how="left")
+
+    mo.md(f"✅ **Jointure M-6 terminée** : {len(df_m6_joined):,} lignes")
+    return (df_m6_joined,)
+
+
+@app.cell
+def _():
+    mo.md(r"""## 🔍 Dédoublonnage M-6""")
+    return
+
+
+@app.cell(hide_code=True)
+def _(df_m6_joined, type_fichier):
+    mo.stop("M-6" not in type_fichier.value, "")
+    mo.stop(df_m6_joined is None, "")
+
+    nb_avant_m6 = len(df_m6_joined)
+
+    # Dédoublonnage : garder la ligne du fichier le plus récent par PRM
+    df_m6_dedup = (
+        df_m6_joined
+        .sort("_source_timestamp", descending=True)  # Plus récent en premier
+        .unique(subset=["PRM"], keep="first")
+        .drop(["_source_timestamp", "_source_file"])  # Retirer les colonnes techniques
+    )
+
+    nb_apres_m6 = len(df_m6_dedup)
+    nb_duplicatas_m6 = nb_avant_m6 - nb_apres_m6
+
+    mo.md(f"""
+    ✅ **Dédoublonnage M-6 terminé**
+
+    - **{nb_avant_m6:,}** lignes avant dédoublonnage
+    - **{nb_apres_m6:,}** lignes après dédoublonnage
+    - **{nb_duplicatas_m6:,}** duplicatas supprimés ({nb_duplicatas_m6/nb_avant_m6*100:.1f}%)
+    """)
+    return (df_m6_dedup,)
+
+
+@app.cell
+def _():
+    mo.md(r"""## 📤 Export M-6 consolidé""")
+    return
+
+
+@app.cell(hide_code=True)
+def _(df_m6_dedup, folder_path, type_fichier):
+    mo.stop("M-6" not in type_fichier.value, "")
+    mo.stop(df_m6_dedup is None, "")
+
+    # Export unique
+    export_file_m6 = folder_path / "fichier_complet_M-6.csv"
+    df_m6_dedup.write_csv(export_file_m6, separator=";")
+
+    mo.md(f"""
+    ✅ **Export M-6 terminé**
+
+    Fichier créé : `{export_file_m6.name}` ({len(df_m6_dedup):,} lignes)
     """)
     return
 
