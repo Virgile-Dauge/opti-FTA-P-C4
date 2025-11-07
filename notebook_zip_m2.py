@@ -1,0 +1,214 @@
+import marimo
+
+__generated_with = "0.16.5"
+app = marimo.App(width="medium")
+
+async with app.setup(hide_code=True):
+    # Installation des dépendances pour WASM (Pyodide)
+    import sys
+    if "pyodide" in sys.modules:
+        import micropip
+        await micropip.install("polars")
+
+    # Imports standards
+    import marimo as mo
+    import polars as pl
+    from pathlib import Path
+    import subprocess
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(
+        r"""
+    # 📦 Extraction et traitement des fichiers ZIP
+
+    Cet outil permet de :
+    - Sélectionner un dossier contenant des fichiers ZIP protégés
+    - Choisir le type de fichier à extraire (M-2 ou M-6)
+    - Extraire automatiquement tous les ZIP avec **7z** (via `extract_all.sh`)
+    - Déverrouiller les ZIP avec le mot de passe depuis `mdp.txt`
+    - Ignorer les fichiers déjà extraits
+    - Lire et concaténer tous les fichiers CSV extraits avec Polars
+    """
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md("""## ⚙️ Configuration""")
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    type_fichier = mo.ui.radio(
+        options=["M-2", "M-6"],
+        value="M-2",
+        label="Type de fichier à extraire"
+    )
+    type_fichier
+    return (type_fichier,)
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md("""### 📂 Sélection du dossier""")
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    folder_browser = mo.ui.file_browser(
+        initial_path=".",
+        selection_mode="directory",
+        multiple=False,
+        label="Sélectionnez le dossier contenant les fichiers ZIP"
+    )
+    folder_browser
+    return (folder_browser,)
+
+
+@app.cell(hide_code=True)
+def _(folder_browser):
+    mo.stop(not folder_browser.value, mo.md("⚠️ Veuillez sélectionner un dossier"))
+
+    folder_path = folder_browser.path(0)
+
+    mo.stop(folder_path is None, mo.md("⚠️ Aucun dossier sélectionné"))
+    mo.stop(not folder_path.exists(), mo.md(f"❌ Le dossier `{folder_path}` n'existe pas"))
+    mo.stop(not folder_path.is_dir(), mo.md(f"❌ `{folder_path}` n'est pas un dossier"))
+
+    mo.md(f"✅ Dossier sélectionné : `{folder_path}`")
+    return (folder_path,)
+
+
+@app.cell
+def _():
+    mo.md(r"""## 🔑 Lecture du mot de passe""")
+    return
+
+
+@app.cell(hide_code=True)
+def _(folder_path):
+    mdp_file = folder_path / "mdp.txt"
+
+    mo.stop(not mdp_file.exists(), mo.md(f"❌ Fichier `mdp.txt` non trouvé dans `{folder_path}`"))
+
+    password = mdp_file.read_text().strip()
+
+    mo.md(f"✅ Mot de passe chargé depuis `mdp.txt`")
+    return (password,)
+
+
+@app.cell
+def _():
+    mo.md(r"""## 🔓 Extraction et lecture des CSV""")
+    return
+
+
+@app.function(hide_code=True)
+def extract_all_with_7z(folder_path: Path, password: str) -> tuple[str, str]:
+    """
+    Extrait tous les ZIP d'un dossier en utilisant le script bash extract_all.sh avec 7z.
+
+    Args:
+        folder_path: Chemin vers le dossier contenant les ZIP
+        password: Mot de passe pour déverrouiller les ZIP
+
+    Returns:
+        Tuple (stdout, stderr)
+    """
+    # Cherche le script extract_all.sh
+    script_path = Path(__file__).parent / "extract_all.sh"
+
+    if not script_path.exists():
+        raise FileNotFoundError(f"Script extract_all.sh introuvable : {script_path}")
+
+    # Exécute le script dans le dossier cible
+    result = subprocess.run(
+        ['bash', str(script_path), password],
+        cwd=str(folder_path),
+        capture_output=True,
+        text=True,
+        timeout=300  # 5 minutes max
+    )
+
+    return result.stdout, result.stderr
+
+
+@app.cell(hide_code=True)
+def _(folder_path, password, type_fichier):
+    # Extraction avec 7z via le script bash
+    try:
+        stdout, stderr = extract_all_with_7z(folder_path, password)
+
+        # Affichage du résultat de l'extraction
+        _extraction_log = stdout.replace('\n', '\n\n')
+
+        mo.md(f"""
+    ## 📊 Résultat de l'extraction (7z)
+
+    {_extraction_log}
+
+    ---
+        """)
+    except subprocess.TimeoutExpired:
+        mo.md("❌ **Timeout** : L'extraction a pris trop de temps (>5 minutes)")
+    except FileNotFoundError as e:
+        mo.md(f"❌ **Erreur** : {str(e)}")
+    except Exception as e:
+        mo.md(f"❌ **Erreur inattendue** : {str(e)}")
+
+    # Lecture des CSV extraits
+    pattern = type_fichier.value
+    csv_files = sorted([f for f in folder_path.glob("ENEDIS_*.csv") if pattern in f.name])
+
+    all_dataframes = []
+    for csv_file in csv_files:
+        try:
+            df = pl.read_csv(csv_file, separator=';')
+            all_dataframes.append(df)
+        except Exception as e:
+            mo.md(f"⚠️ Impossible de lire `{csv_file.name}` : {str(e)}")
+
+    mo.md(f"✅ **{len(all_dataframes)} fichiers CSV de type '{pattern}' chargés**")
+    return (all_dataframes,)
+
+
+@app.cell(hide_code=True)
+def _(all_dataframes):
+    mo.stop(len(all_dataframes) == 0, mo.md("❌ Aucun DataFrame chargé"))
+
+    # Concaténation de tous les DataFrames
+    df_concat = pl.concat(all_dataframes)
+
+    _nb_lignes = len(df_concat)
+    _nb_colonnes = len(df_concat.columns)
+    _nb_fichiers = len(all_dataframes)
+
+    mo.md(f"""
+    ## ✅ Concaténation terminée
+
+    - **{_nb_fichiers}** fichiers CSV chargés
+    - **{_nb_lignes:,}** lignes au total
+    - **{_nb_colonnes}** colonnes
+    """)
+    return (df_concat,)
+
+
+@app.cell
+def _():
+    mo.md(r"""## 👀 Aperçu des données""")
+    return
+
+
+@app.cell(hide_code=True)
+def _(df_concat):
+    df_concat
+    return
+
+
+if __name__ == "__main__":
+    app.run()
