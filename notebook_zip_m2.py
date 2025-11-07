@@ -277,5 +277,80 @@ def _(df_final):
     return
 
 
+@app.cell
+def _():
+    mo.md(r"""## 📤 Export par mois""")
+    return
+
+
+@app.cell(hide_code=True)
+def _(df_final):
+    # Ajout d'une colonne mois pour le groupement (en filtrant les null)
+    df_with_month = (
+        df_final
+        .filter(pl.col("DATE_BASCULE").is_not_null())
+        .with_columns([
+            pl.col("DATE_BASCULE").dt.strftime("%Y-%m").alias("mois")
+        ])
+    )
+
+    # Liste des mois uniques avec statistiques
+    mois_stats = (
+        df_with_month
+        .group_by("mois")
+        .agg([
+            pl.len().alias("nb_lignes")
+        ])
+        .sort("mois")
+    )
+
+    _nb_mois = len(mois_stats)
+    _stats_text = "\n".join([
+        f"- **{row['mois']}** : {row['nb_lignes']:,} lignes"
+        for row in mois_stats.iter_rows(named=True)
+    ])
+
+    mo.md(f"""
+    ### 📊 Statistiques par mois
+
+    {_nb_mois} mois détectés :
+
+    {_stats_text}
+    """)
+    return (df_with_month, mois_stats)
+
+
+@app.cell(hide_code=True)
+def _(df_with_month, folder_path, mois_stats):
+    # Export d'un CSV par mois
+    export_logs = []
+
+    for row in mois_stats.iter_rows(named=True):
+        mois = row['mois']
+        nb_lignes = row['nb_lignes']
+
+        # Filtrer les données du mois
+        df_mois = df_with_month.filter(pl.col("mois") == mois)
+
+        # Nom du fichier
+        export_file = folder_path / f"export_{mois}.csv"
+
+        # Export CSV
+        df_mois.write_csv(export_file, separator=";")
+
+        export_logs.append(f"✅ `{export_file.name}` : {nb_lignes:,} lignes")
+
+    _export_summary = "\n".join(export_logs)
+
+    mo.md(f"""
+    ### ✅ Exports terminés
+
+    {len(export_logs)} fichiers créés dans `{folder_path}` :
+
+    {_export_summary}
+    """)
+    return
+
+
 if __name__ == "__main__":
     app.run()
