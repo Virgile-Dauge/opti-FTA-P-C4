@@ -182,7 +182,12 @@ def _(all_dataframes):
     mo.stop(len(all_dataframes) == 0, mo.md("❌ Aucun DataFrame chargé"))
 
     # Concaténation de tous les DataFrames
-    df_concat = pl.concat(all_dataframes)
+    df_concat = (
+        pl.concat(all_dataframes)
+        .with_columns([
+            pl.col('DATE_BASCULE').str.to_date()
+        ])
+    )
 
     _nb_lignes = len(df_concat)
     _nb_colonnes = len(df_concat.columns)
@@ -199,14 +204,76 @@ def _(all_dataframes):
 
 
 @app.cell
+def _(df_concat):
+    df_concat
+    return
+
+
+@app.cell
 def _():
-    mo.md(r"""## 👀 Aperçu des données""")
+    mo.md(r"""## 📋 Lecture de la base client""")
     return
 
 
 @app.cell(hide_code=True)
-def _(df_concat):
-    df_concat
+def _(folder_path):
+    # Lecture du fichier base_client.xlsx
+    base_client_file = folder_path / "base_client.xlsx"
+
+    mo.stop(not base_client_file.exists(), mo.md(f"❌ Fichier `base_client.xlsx` non trouvé dans `{folder_path}`"))
+
+    base_client = pl.read_excel(base_client_file)
+
+    _nb_clients = len(base_client)
+    _colonnes = ", ".join([f"`{col}`" for col in base_client.columns])
+
+    mo.md(f"""
+    ✅ **Base client chargée** : {_nb_clients} clients
+
+    Colonnes : {_colonnes}
+    """)
+    return (base_client,)
+
+
+@app.cell
+def _():
+    mo.md(r"""## 🔗 Jointure avec les données de consommation""")
+    return
+
+
+@app.cell(hide_code=True)
+def _(base_client, df_concat):
+    # Left join : garder uniquement les lignes de df_concat correspondant aux clients actuels
+    # Harmonisation du type de la colonne PRM (conversion en string)
+    df_concat_typed = df_concat.with_columns([
+        pl.col("PRM").cast(pl.Utf8)
+    ])
+
+    df_final = base_client.join(df_concat_typed, on="PRM", how="left")
+
+    _nb_avant = len(df_concat)
+    _nb_apres = len(df_final)
+    _nb_clients = len(base_client)
+
+    mo.md(f"""
+    ✅ **Jointure terminée**
+
+    - **{_nb_clients}** clients dans la base client
+    - **{_nb_avant:,}** lignes de consommation avant jointure
+    - **{_nb_apres:,}** lignes après jointure (filtrées sur clients actuels)
+    """)
+    return (df_final,)
+
+
+@app.cell
+def _():
+    mo.md(r"""## 👀 Aperçu des données finales""")
+    return
+
+
+@app.cell(hide_code=True)
+def _(df_final):
+    df_final
     return
 
 
